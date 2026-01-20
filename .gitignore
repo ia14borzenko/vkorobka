@@ -1,0 +1,30 @@
+# esp idf
+build/
+sdkconfig.old
+CMakeCache.txt
+CMakeFiles/
+
+# vs
+.vs/
+bin/
+obj/
+*.user
+Debug/
+Release/
+
+# keil
+*.uvopt*
+*.uvguix.*
+*.dep
+Obj/
+List/
+*.map
+*.axf
+*.hex
+*.bin
+*.o
+*.d
+*.htm
+*.dbgconf
+*.lnp
+/RTE
