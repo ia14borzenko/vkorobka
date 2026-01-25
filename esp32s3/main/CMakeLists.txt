@@ -1,3 +1,3 @@
 idf_component_register(SRCS "main.cpp"
                     INCLUDE_DIRS "."
-                    REQUIRES esp_wifi nvs_flash lwip freertos)
+                    REQUIRES esp_wifi nvs_flash lwip freertos driver)
