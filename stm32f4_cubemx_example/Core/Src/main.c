@@ -83,11 +83,18 @@ uint8_t got_cmd_begin(uint32_t len, const char* msg)
 	return 1;
 }
 
+void send_uart(UART_HandleTypeDef *huart, const void* data, uint32_t size)
+{
+	HAL_UART_Transmit(huart, data, size, HAL_MAX_DELAY);
+}
+
+char stm_resp[] = "stm32";
 void cmd_stm_proc(uint32_t dlen, const char* data)
 {
-	(void)dlen;
-	(void)data;
-	return;
+	if (memcmp(data, "win11", 5))
+	{
+		send_uart(&huart2, stm_resp, 5);
+	}
 }
 
 void cmd_display_proc(uint32_t dlen, const char* data)
@@ -104,7 +111,7 @@ void cmd_speaker_proc(uint32_t dlen, const char* data)
 	return;
 }
 
-void cmd_proc(uint32_t len, const char* msg)
+void cmd_proc(const char* msg, uint32_t len)
 {
 	if (!got_cmd_begin(len, msg)) return;
 	
@@ -162,25 +169,25 @@ const char lbarr[2] = "> ";
 
 #define RXBUFUSART1 128
 #define TXBUFUSART1 128
-char tx1msg[256];
-char rx1_char[1] = {};
+char tx1msg[TXBUFUSART1];
+char rx1_char[RXBUFUSART1] = {};
 uint32_t rxusart1buf_i = 0;
 volatile char txusart1buf[TXBUFUSART1] = {};
 volatile char rxusart1buf[RXBUFUSART1] = {};
-const uint8_t rxchar_lag = 2;
+const uint8_t rxchar_lag = 0;
 const char msg[] = "zdarova";
 const int msg_size = 7;
 void rxusart1_response(uint8_t is_terminal)
 {
 	int msg_size_ = 0;
 	uint8_t is_msg = 0;
-	if ((memcmp(rxusart1buf, "privet", 6) == 0) && (rxusart1buf_i == 6))
+	if ((memcmp(rx1_char, "privet", 6) == 0) && (rxusart1buf_i == 6))
 	{
 		is_msg = 1;
 		msg_size_ = msg_size;
 		memcpy(txusart1buf, msg, msg_size);
 	}
-	else if ((memcmp(rxusart1buf, "gorbunki", 8) == 0) && (rxusart1buf_i == 8))
+	else if ((memcmp(rx1_char, "gorbunki", 8) == 0) && (rxusart1buf_i == 8))
 	{
 		is_msg = 1;
 		msg_size_ = 11;
@@ -222,51 +229,18 @@ void uart1rx_cb(void)
 		++rxusart1buf_i;
 	}
 	
-	HAL_UART_Receive_IT(&huart1, rxusart1buf+rxusart1buf_i, 1);
+	HAL_UART_Receive_IT(&huart1, rx1_char+rxusart1buf_i, 1);
 }
 
 
 #define RXBUFUSART2 128
 #define TXBUFUSART2 128
 char tx2msg[256];
-char rx2_char[1] = {};
+char rx2_char[RXBUFUSART2] = {};
 uint32_t rxusart2buf_i = 0;
 volatile char txusart2buf[TXBUFUSART2] = {};
-volatile char rxusart2buf[RXBUFUSART2] = {};
-void rxusart2_response(uint8_t is_terminal)
-{
-	int msg_size_ = 0;
-	uint8_t is_msg = 0;
-	if ((memcmp(rxusart2buf, "privet", 6) == 0) && (rxusart2buf_i == 6))
-	{
-		is_msg = 1;
-		msg_size_ = msg_size;
-		memcpy(txusart2buf, msg, msg_size);
-	}
-	else if ((memcmp(rxusart2buf, "gorbunki", 8) == 0) && (rxusart2buf_i == 8))
-	{
-		is_msg = 1;
-		msg_size_ = 11;
-		memcpy(txusart2buf, "Liquidation", 11);
-	}
-	else
-	{
-		msg_size_ = 0;
-	}
-	
-	if (is_terminal) memcpy(tx2msg, crlf, 2); // end current input line
-	if (is_msg)
-	{
-		memcpy(tx2msg+(is_terminal ? 2 : 0), txusart2buf, msg_size_); // output line
-		memcpy(tx2msg+(is_terminal ? 2 : 0)+msg_size_, crlf, 2); // end output line
-		msg_size_ += (is_terminal ? 2 : 0);
-	}
-	if (is_terminal) memcpy(tx2msg+(is_terminal ? 2 : 0)+msg_size_, lbarr, 2); // begin next input line
-	
-	HAL_UART_Transmit(&huart2, tx2msg, msg_size_+(is_terminal ? 4 : 0), HAL_MAX_DELAY);
-}
 
-uint8_t rx2char_lag = 0x87;
+uint8_t rx2char_lag = 0x0;
 char txconst[1] = { 0x55 };
 void uart2rx_cb(void)
 {
@@ -274,7 +248,7 @@ void uart2rx_cb(void)
 	
 	if (rx2_char[rxusart2buf_i+rx2char_lag] == 0x0D)
 	{
-		rxusart2_response(0);
+		cmd_proc(rx2_char, rxusart2buf_i);
 		rxusart2buf_i = 0;
 	}
 	else
@@ -282,7 +256,7 @@ void uart2rx_cb(void)
 		++rxusart2buf_i;
 	}
 	
-	HAL_UART_Receive_IT(&huart2, rxusart2buf+rxusart2buf_i, 1);
+	HAL_UART_Receive_IT(&huart2, rx2_char+rxusart2buf_i, 1);
 }
 
 void HAL_UART_RxCpltCallback(UART_HandleTypeDef *huart)
@@ -352,8 +326,8 @@ int main(void)
   MX_I2S3_Init();
   MX_SPI1_Init();
   /* USER CODE BEGIN 2 */
-	HAL_UART_Receive_IT(&huart1, rxusart1buf, 1);
-	HAL_UART_Receive_IT(&huart2, rxusart2buf, 1);
+	HAL_UART_Receive_IT(&huart1, rx1_char, 1);
+	HAL_UART_Receive_IT(&huart2, rx2_char, 1);
 	//HAL_UART_Transmit_IT(&huart1,txusart1buf,strlen(txusart1buf));
 	HAL_TIM_Base_Start_IT(&htim2);
   /* USER CODE END 2 */

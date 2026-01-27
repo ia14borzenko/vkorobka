@@ -66,20 +66,13 @@ extern "C" void app_main()
         if (n > 0)
         {
             uart_write_bytes(UART_LINK, buf, n);
-            for (int i = 0; i < n; i++) {
-                sprintf(hex_buf, "TX to link: 0x%02X\r\n", buf[i]);
-                uart_write_bytes(UART_PC, hex_buf, strlen(hex_buf));
-            }
         }
 
         // LINK -> PC
         n = uart_read_bytes(UART_LINK, buf, sizeof(buf), 100 / portTICK_PERIOD_MS);
         if (n > 0)
         {
-            for (int i = 0; i < n; i++) {
-                sprintf(hex_buf, "RX from link: 0x%02X\r\n", buf[i]);
-                uart_write_bytes(UART_PC, hex_buf, strlen(hex_buf));
-            }
+            uart_write_bytes(UART_PC, buf, n);
         }
 
         vTaskDelay(10 / portTICK_PERIOD_MS);
