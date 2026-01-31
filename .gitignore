@@ -28,3 +28,7 @@ List/
 *.dbgconf
 *.lnp
 /RTE
+
+*.scvd
+*.iex
+*.idx

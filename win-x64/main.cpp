@@ -1,91 +1,140 @@
-#define _WINSOCK_DEPRECATED_NO_WARNINGS
-#include <winsock2.h>
+
 #include <ws2tcpip.h>
 
 #include <iostream>
-#include <string>
 #include <thread>
+#include <atomic>
+#include <string>
 
-#pragma comment(lib, "Ws2_32.lib")
+#include "sys.hpp"
+#include "netpack.h"
 
-void rx_thread(SOCKET client_sock) {
-    char buf[256];
-    while (true) {
-        int len = recv(client_sock, buf, sizeof(buf) - 1, 0);
-        if (len <= 0) {
-            std::cout << "Connection closed or error." << std::endl;
+
+char rx_payload[10240];
+
+static help_t help_cmd;
+static send_t send_cmd;
+
+static std::atomic<bool> g_running{ true };
+
+// Глобальный указатель на TCP объект для доступа из console_thread
+static tcp_t* g_tcp_ptr = nullptr;
+
+void console_thread()
+{
+    std::cout << "'help' for command list\n" << ANSI_ENDL;
+
+    while (g_running.load())
+    {
+        std::cout << "> ";
+
+        std::string line;
+        if (!std::getline(std::cin, line))
+        {
+            g_running.store(false);
             break;
         }
-        buf[len] = 0;
-        std::cout << "ESP: " << buf;
+
+        std::string cmd_name;
+        cctx_t ctx;
+        ctx.tcp = g_tcp_ptr;  // Передаем указатель на TCP объект
+
+        parse_line(line, cmd_name, ctx);
+
+        if (cmd_name.empty())
+            continue;
+
+        auto& reg = cvar_t::registry();
+        auto it = reg.find(cmd_name);
+        if (it == reg.end())
+        {
+            std::cout << ANSI_WARN << "unknown command" << ANSI_ENDL << std::endl;
+            continue;
+        }
+
+        it->second->exec(ctx);
     }
 }
 
-int main() {
-    WSADATA wsa;
-    if (WSAStartup(MAKEWORD(2, 2), &wsa) != 0) {
-        std::cout << "WSAStartup failed." << std::endl;
-        return 1;
-    }
+static tcp_t tcp(&g_running);
 
-    SOCKET listen_sock = socket(AF_INET, SOCK_STREAM, IPPROTO_TCP);
-    if (listen_sock == INVALID_SOCKET) {
-        std::cout << "Socket creation failed." << std::endl;
-        WSACleanup();
-        return 1;
-    }
-
-    sockaddr_in addr{};
-    addr.sin_family = AF_INET;
-    addr.sin_port = htons(1234);
-    addr.sin_addr.s_addr = INADDR_ANY;  // ������� �� ���� �����������
-
-    if (bind(listen_sock, (sockaddr*)&addr, sizeof(addr)) == SOCKET_ERROR) {
-        std::cout << "Bind failed: " << WSAGetLastError() << std::endl;
-        closesocket(listen_sock);
-        WSACleanup();
-        return 1;
-    }
-
-    if (listen(listen_sock, SOMAXCONN) == SOCKET_ERROR) {
-        std::cout << "Listen failed: " << WSAGetLastError() << std::endl;
-        closesocket(listen_sock);
-        WSACleanup();
-        return 1;
-    }
-
-    std::cout << "Server listening on port 1234. Waiting for ESP32..." << std::endl;
-
-    sockaddr_in client_addr;
-    int client_addr_len = sizeof(client_addr);
-    SOCKET client_sock = accept(listen_sock, (sockaddr*)&client_addr, &client_addr_len);
-    if (client_sock == INVALID_SOCKET) {
-        std::cout << "Accept failed: " << WSAGetLastError() << std::endl;
-        closesocket(listen_sock);
-        WSACleanup();
-        return 1;
-    }
-
-    char client_ip[INET_ADDRSTRLEN];
-    inet_ntop(AF_INET, &client_addr.sin_addr, client_ip, sizeof(client_ip));
-    std::cout << "Connected to ESP32 at " << client_ip << std::endl;
-
-    // ��������� listen_sock, ��� ��� ��� ����-��-����
-    closesocket(listen_sock);
-
-    std::thread rx(rx_thread, client_sock);
-
-    std::string line;
-    while (std::getline(std::cin, line)) {
-        line += "\n";
-        if (send(client_sock, line.c_str(), (int)line.size(), 0) == SOCKET_ERROR) {
-            std::cout << "Send failed: " << WSAGetLastError() << std::endl;
-            break;
+// Обработчик принятых пакетов
+void handle_packet(cmdcode_t cmd_code, const char* payload, u32 payload_len)
+{
+    std::cout << ANSI_INFO << "[app] Packet received:" << ANSI_ENDL;
+    std::cout << "  CMD Code: 0x" << std::hex << cmd_code << std::dec << std::endl;
+    std::cout << "  Payload length: " << payload_len << " bytes" << std::endl;
+    
+    if (payload_len > 0 && payload != nullptr)
+    {
+        std::cout << "  Payload: ";
+        // Выводим данные (первые 100 байт для читаемости)
+        size_t print_len = (payload_len > 100) ? 100 : payload_len;
+        for (u32 i = 0; i < print_len; ++i)
+        {
+            if (payload[i] >= 32 && payload[i] < 127)
+            {
+                std::cout << payload[i];
+            }
+            else
+            {
+                std::cout << "\\x" << std::hex << (unsigned char)payload[i] << std::dec;
+            }
         }
+        if (payload_len > 100)
+        {
+            std::cout << "...";
+        }
+        std::cout << std::endl;
+    }
+    
+    // Здесь можно добавить обработку различных типов пакетов
+    switch (cmd_code)
+    {
+    case CMD_ESP:
+        std::cout << ANSI_SUCC << "  Type: ESP32 command" << ANSI_ENDL << std::endl;
+        break;
+    case CMD_STM:
+        std::cout << ANSI_SUCC << "  Type: STM32 command" << ANSI_ENDL << std::endl;
+        break;
+    case CMD_MIC:
+        std::cout << ANSI_SUCC << "  Type: Microphone data" << ANSI_ENDL << std::endl;
+        break;
+    case CMD_SPK:
+        std::cout << ANSI_SUCC << "  Type: Speaker data" << ANSI_ENDL << std::endl;
+        break;
+    default:
+        break;
+    }
+}
+
+int main()
+{
+    g_tcp_ptr = &tcp;  // Устанавливаем глобальный указатель
+
+    // Устанавливаем обработчик принятых пакетов
+    tcp.set_packet_callback(handle_packet);
+
+    std::thread t_console(console_thread);
+
+    if (!tcp.start())
+    {
+        std::cout << ANSI_ERR << "[tcp] TCP start failed" << ANSI_ENDL << std::endl;
+        g_running.store(false);
+        t_console.join();
+        return 1;
     }
 
-    rx.join();
-    closesocket(client_sock);
-    WSACleanup();
+    std::cout << ANSI_SUCC << "[main] TCP server started. Waiting for connections..." << ANSI_ENDL << std::endl;
+
+    // Основной цикл - просто ждем завершения
+    while (g_running.load())
+    {
+        std::this_thread::sleep_for(std::chrono::milliseconds(100));
+    }
+
+    tcp.stop();
+    t_console.join();
+
     return 0;
 }
