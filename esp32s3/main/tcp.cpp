@@ -66,6 +66,30 @@ bool tcp_t::is_connected(void) const
     return connected && (sock >= 0);
 }
 
+tcp_state_t tcp_t::get_state(void) const
+{
+    return state;
+}
+
+const char* tcp_t::get_state_string(void) const
+{
+    switch (state)
+    {
+    case TCP_STATE_INIT:
+        return "INIT";
+    case TCP_STATE_CONNECTING:
+        return "CONNECTING";
+    case TCP_STATE_CONNECTED:
+        return "CONNECTED";
+    case TCP_STATE_LOST:
+        return "LOST";
+    case TCP_STATE_RETRY:
+        return "RETRY";
+    default:
+        return "UNKNOWN";
+    }
+}
+
 void tcp_t::set_packet_callback(packet_callback_t callback)
 {
     rx_callback = callback;

@@ -8,8 +8,22 @@
 #include <sstream>
 
 #include <winsock2.h>
+#include <mutex>
+#include <condition_variable>
+#include <atomic>
+#include <string>
+#include <thread>
+#include <chrono>
 #include "tcp.hpp"
+#include "wifi.hpp"
 #include "netpack.h"
+
+// Внешние переменные для синхронизации с командой test_esp32 (определены в main.cpp)
+extern std::mutex g_response_mutex;
+extern std::condition_variable g_response_cv;
+extern std::atomic<bool> g_test_response_received;
+extern std::atomic<bool> g_status_response_received;
+extern std::string g_esp32_status_response;
 
 #define ANSI_FG_PREFIX "3"
 #define ANSI_FG_BRIGHT_PREFIX "9"
@@ -46,6 +60,7 @@ struct cctx_t
     std::vector<std::string> positional;
     std::map<std::string, std::string> flags;
     tcp_t* tcp;  // Указатель на TCP объект для отправки данных
+    wifi_t* wifi;  // Указатель на WiFi объект для получения состояния
 
     const std::string& get(size_t index) const
     {
@@ -238,6 +253,223 @@ struct send_t : cvar_t
             else
             {
                 std::cout << ANSI_SUCC << "Data sent: " << data << ANSI_ENDL << std::endl;
+            }
+        }
+    }
+};
+
+/* ============================================================
+   command status
+   ============================================================ */
+
+struct status_t : cvar_t
+{
+    status_t() : cvar_t("status", "show WiFi and TCP status") {}
+
+    void exec(cctx_t& ctx) override
+    {
+        std::cout << ANSI_INFO << "=== Status Information ===" << ANSI_ENDL << std::endl;
+        
+        // WiFi Status
+        std::cout << ANSI_INFO << "WiFi:" << ANSI_ENDL;
+        if (!ctx.wifi)
+        {
+            std::cout << ANSI_ERR << "  Status: NOT INITIALIZED" << ANSI_ENDL << std::endl;
+        }
+        else
+        {
+            wifi_state_t wifi_state = ctx.wifi->get_state();
+            std::string wifi_state_str = ctx.wifi->get_state_string();
+            bool wifi_connected = ctx.wifi->is_connected();
+            
+            // Цветовое оформление состояния WiFi
+            std::string wifi_color;
+            if (wifi_state == wifi_state_t::connected)
+            {
+                wifi_color = ANSI_SUCC;
+            }
+            else if (wifi_state == wifi_state_t::lost || wifi_state == wifi_state_t::retry)
+            {
+                wifi_color = ANSI_WARN;
+            }
+            else if (wifi_state == wifi_state_t::init)
+            {
+                wifi_color = ANSI_ERR;
+            }
+            else
+            {
+                wifi_color = ANSI_INFO;
+            }
+            
+            std::cout << "  State: " << wifi_color << wifi_state_str << ANSI_ENDL;
+            std::cout << "  Connected: " << (wifi_connected ? ANSI_SUCC : ANSI_WARN) 
+                      << (wifi_connected ? "YES" : "NO") << ANSI_ENDL << std::endl;
+        }
+        
+        // TCP Status
+        std::cout << ANSI_INFO << "TCP:" << ANSI_ENDL;
+        if (!ctx.tcp)
+        {
+            std::cout << ANSI_ERR << "  Status: NOT INITIALIZED" << ANSI_ENDL << std::endl;
+        }
+        else
+        {
+            tcp_state_t tcp_state = ctx.tcp->get_state();
+            std::string tcp_state_str = ctx.tcp->get_state_string();
+            bool tcp_connected = ctx.tcp->is_connected();
+            
+            // Цветовое оформление состояния TCP
+            std::string tcp_color;
+            if (tcp_state == tcp_state_t::connected)
+            {
+                tcp_color = ANSI_SUCC;
+            }
+            else if (tcp_state == tcp_state_t::lost || tcp_state == tcp_state_t::retry)
+            {
+                tcp_color = ANSI_WARN;
+            }
+            else if (tcp_state == tcp_state_t::init)
+            {
+                tcp_color = ANSI_ERR;
+            }
+            else
+            {
+                tcp_color = ANSI_INFO;
+            }
+            
+            std::cout << "  State: " << tcp_color << tcp_state_str << ANSI_ENDL;
+            std::cout << "  Connected: " << (tcp_connected ? ANSI_SUCC : ANSI_WARN) 
+                      << (tcp_connected ? "YES" : "NO") << ANSI_ENDL << std::endl;
+        }
+    }
+};
+
+/* ============================================================
+   command test_esp32
+   ============================================================ */
+
+struct test_esp32_t : cvar_t
+{
+    test_esp32_t() : cvar_t("test_esp32", "test connection with ESP32 and get its status") {}
+
+    void exec(cctx_t& ctx) override
+    {
+        if (!ctx.tcp)
+        {
+            std::cout << ANSI_ERR << "TCP not initialized" << ANSI_ENDL << std::endl;
+            return;
+        }
+
+        if (!ctx.tcp->is_connected())
+        {
+            std::cout << ANSI_WARN << "TCP not connected. Cannot test ESP32." << ANSI_ENDL << std::endl;
+            return;
+        }
+
+        std::cout << ANSI_INFO << "Testing connection with ESP32..." << ANSI_ENDL << std::endl;
+
+        // Сбрасываем флаги
+        g_test_response_received.store(false);
+        g_status_response_received.store(false);
+        g_esp32_status_response.clear();
+
+        // Отправляем тестовый пакет
+        if (!ctx.tcp->send_packet(CMD_WIN, "TEST"))
+        {
+            std::cout << ANSI_ERR << "Failed to send test packet" << ANSI_ENDL << std::endl;
+            return;
+        }
+
+        std::cout << ANSI_INFO << "Test packet sent, waiting for response..." << ANSI_ENDL << std::endl;
+
+        // Ожидаем ответ с таймаутом (2 секунды)
+        {
+            std::unique_lock<std::mutex> lock(g_response_mutex);
+            if (g_response_cv.wait_for(lock, std::chrono::seconds(2), 
+                [] { return g_test_response_received.load(); }))
+            {
+                std::cout << ANSI_SUCC << "Test response received successfully!" << ANSI_ENDL << std::endl;
+            }
+            else
+            {
+                std::cout << ANSI_WARN << "Test response timeout. ESP32 may not be connected or not responding." << ANSI_ENDL << std::endl;
+                return;
+            }
+        }
+
+        // Если тест успешен, запрашиваем статус
+        std::this_thread::sleep_for(std::chrono::milliseconds(100)); // Небольшая задержка
+        
+        std::cout << ANSI_INFO << "Requesting status from ESP32..." << ANSI_ENDL << std::endl;
+        
+        if (!ctx.tcp->send_packet(CMD_WIN, "STATUS"))
+        {
+            std::cout << ANSI_ERR << "Failed to send status request" << ANSI_ENDL << std::endl;
+            return;
+        }
+
+        // Ожидаем ответ со статусом с таймаутом (2 секунды)
+        {
+            std::unique_lock<std::mutex> lock(g_response_mutex);
+            if (g_response_cv.wait_for(lock, std::chrono::seconds(2), 
+                [] { return g_status_response_received.load(); }))
+            {
+                // Парсим и выводим статус
+                std::string status = g_esp32_status_response;
+                std::cout << ANSI_SUCC << "=== ESP32 Status ===" << ANSI_ENDL << std::endl;
+                
+                // Парсим формат: STATUS:WIFI=<state>:<connected>,TCP=<state>:<connected>
+                if (status.length() > 7 && status.substr(0, 7) == "STATUS:")
+                {
+                    std::string status_data = status.substr(7);
+                    
+                    // Парсим WiFi статус
+                    size_t wifi_pos = status_data.find("WIFI=");
+                    size_t tcp_pos = status_data.find(",TCP=");
+                    
+                    if (wifi_pos != std::string::npos && tcp_pos != std::string::npos)
+                    {
+                        // WiFi
+                        std::string wifi_info = status_data.substr(wifi_pos + 5, tcp_pos - wifi_pos - 5);
+                        size_t colon_pos = wifi_info.find(':');
+                        if (colon_pos != std::string::npos)
+                        {
+                            std::string wifi_state = wifi_info.substr(0, colon_pos);
+                            std::string wifi_connected = wifi_info.substr(colon_pos + 1);
+                            
+                            std::cout << ANSI_INFO << "WiFi:" << ANSI_ENDL;
+                            std::string wifi_color = (wifi_state == "CONNECTED") ? ANSI_SUCC : 
+                                                    ((wifi_state == "LOST" || wifi_state == "RETRY") ? ANSI_WARN : ANSI_INFO);
+                            std::cout << "  State: " << wifi_color << wifi_state << ANSI_ENDL;
+                            std::cout << "  Connected: " << (wifi_connected == "1" ? ANSI_SUCC : ANSI_WARN)
+                                      << (wifi_connected == "1" ? "YES" : "NO") << ANSI_ENDL << std::endl;
+                        }
+                        
+                        // TCP
+                        std::string tcp_info = status_data.substr(tcp_pos + 5);
+                        colon_pos = tcp_info.find(':');
+                        if (colon_pos != std::string::npos)
+                        {
+                            std::string tcp_state = tcp_info.substr(0, colon_pos);
+                            std::string tcp_connected = tcp_info.substr(colon_pos + 1);
+                            
+                            std::cout << ANSI_INFO << "TCP:" << ANSI_ENDL;
+                            std::string tcp_color = (tcp_state == "CONNECTED") ? ANSI_SUCC : 
+                                                    ((tcp_state == "LOST" || tcp_state == "RETRY") ? ANSI_WARN : ANSI_INFO);
+                            std::cout << "  State: " << tcp_color << tcp_state << ANSI_ENDL;
+                            std::cout << "  Connected: " << (tcp_connected == "1" ? ANSI_SUCC : ANSI_WARN)
+                                      << (tcp_connected == "1" ? "YES" : "NO") << ANSI_ENDL << std::endl;
+                        }
+                    }
+                }
+                else
+                {
+                    std::cout << ANSI_WARN << "Received status in unexpected format: " << status << ANSI_ENDL << std::endl;
+                }
+            }
+            else
+            {
+                std::cout << ANSI_WARN << "Status response timeout." << ANSI_ENDL << std::endl;
             }
         }
     }

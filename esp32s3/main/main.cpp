@@ -28,7 +28,79 @@ static tcp_t* g_tcp = nullptr;
 
 // Обработчик принятых пакетов
 static void handle_packet(cmdcode_t cmd_code, const char* payload, u32 payload_len) {
-    // Простой вывод как строка (как было в оригинале)
+    ESP_LOGI(TAG, "[RX] Packet received: CMD=0x%04x, len=%u", cmd_code, payload_len);
+    
+    // Обработка команд от win-x64
+    if (cmd_code == CMD_WIN && payload_len > 0 && payload != nullptr) {
+        // Создаем временную строку для сравнения
+        char* str_buf = (char*)malloc(payload_len + 1);
+        if (str_buf) {
+            memcpy(str_buf, payload, payload_len);
+            str_buf[payload_len] = '\0';
+            
+            // Обработка команды TEST
+            if (strcmp(str_buf, "TEST") == 0) {
+                ESP_LOGI(TAG, "Received TEST command, sending response");
+                if (g_tcp && g_tcp->is_connected()) {
+                    if (g_tcp->send_packet_str(CMD_ESP, "TEST_RESPONSE")) {
+                        ESP_LOGI(TAG, "Test response sent successfully");
+                    } else {
+                        ESP_LOGE(TAG, "Failed to send test response");
+                    }
+                } else {
+                    ESP_LOGW(TAG, "TCP not connected, cannot send test response");
+                }
+                free(str_buf);
+                return;
+            }
+            
+            // Обработка команды STATUS
+            if (strcmp(str_buf, "STATUS") == 0) {
+                ESP_LOGI(TAG, "Received STATUS command, sending status");
+                if (g_tcp && g_tcp->is_connected()) {
+                    // Формируем строку статуса: STATUS:WIFI=<state>:<connected>,TCP=<state>:<connected>
+                    char status_buf[256];
+                    const char* wifi_state_str = "UNKNOWN";
+                    int wifi_connected = 0;
+                    
+                    if (g_wifi) {
+                        wifi_connected = g_wifi->is_connected() ? 1 : 0;
+                        // WiFi на ESP32 не имеет состояний как на win-x64, только подключен/не подключен
+                        wifi_state_str = wifi_connected ? "CONNECTED" : "DISCONNECTED";
+                    }
+                    
+                    const char* tcp_state_str = "UNKNOWN";
+                    int tcp_connected = 0;
+                    
+                    if (g_tcp) {
+                        tcp_state_str = g_tcp->get_state_string();
+                        tcp_connected = g_tcp->is_connected() ? 1 : 0;
+                    }
+                    
+                    snprintf(status_buf, sizeof(status_buf), 
+                            "STATUS:WIFI=%s:%d,TCP=%s:%d",
+                            wifi_state_str, wifi_connected,
+                            tcp_state_str, tcp_connected);
+                    
+                    if (g_tcp->send_packet_str(CMD_ESP, status_buf)) {
+                        ESP_LOGI(TAG, "Status sent successfully: %s", status_buf);
+                    } else {
+                        ESP_LOGE(TAG, "Failed to send status");
+                    }
+                } else {
+                    ESP_LOGW(TAG, "TCP not connected, cannot send status");
+                }
+                free(str_buf);
+                return;
+            }
+            
+            // Обычный вывод для других команд
+            ESP_LOGI(TAG, "PC: %s", str_buf);
+            free(str_buf);
+        }
+    }
+    
+    // Обычный вывод для других типов пакетов
     if (payload_len > 0 && payload != nullptr) {
         // Создаем временную строку для вывода
         char* str_buf = (char*)malloc(payload_len + 1);
@@ -39,8 +111,6 @@ static void handle_packet(cmdcode_t cmd_code, const char* payload, u32 payload_l
             free(str_buf);
         }
     }
-    
-    ESP_LOGI(TAG, "[RX] Packet received: CMD=0x%04x, len=%u", cmd_code, payload_len);
     
     switch (cmd_code) {
         case CMD_WIN:
@@ -97,6 +167,35 @@ static void console_input_task(void* pvParameters) {
                 payload[pos] = '\0';
                 
                 if (g_tcp && g_tcp->is_connected()) {
+                    // Обработка команды status
+                    if (strcmp(payload, "status") == 0) {
+                        ESP_LOGI(TAG, "=== Status Information ===");
+                        
+                        // WiFi Status
+                        ESP_LOGI(TAG, "WiFi:");
+                        if (g_wifi) {
+                            bool wifi_connected = g_wifi->is_connected();
+                            ESP_LOGI(TAG, "  Connected: %s", wifi_connected ? "YES" : "NO");
+                        } else {
+                            ESP_LOGE(TAG, "  Status: NOT INITIALIZED");
+                        }
+                        
+                        // TCP Status
+                        ESP_LOGI(TAG, "TCP:");
+                        if (g_tcp) {
+                            const char* tcp_state_str = g_tcp->get_state_string();
+                            bool tcp_connected = g_tcp->is_connected();
+                            ESP_LOGI(TAG, "  State: %s", tcp_state_str);
+                            ESP_LOGI(TAG, "  Connected: %s", tcp_connected ? "YES" : "NO");
+                        } else {
+                            ESP_LOGE(TAG, "  Status: NOT INITIALIZED");
+                        }
+                        
+                        printf("\r\n");
+                        pos = 0;
+                        continue;
+                    }
+                    
                     // Проверяем, является ли это командой send с кодом
                     // Формат: "send <code> <data>" или просто "<data>"
                     if (strncmp(payload, "send ", 5) == 0) {

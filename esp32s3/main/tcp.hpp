@@ -36,6 +36,12 @@ public:
     // Проверка, подключен ли TCP
     bool is_connected(void) const;
     
+    // Получить текущее состояние TCP
+    tcp_state_t get_state(void) const;
+    
+    // Получить строковое представление состояния
+    const char* get_state_string(void) const;
+    
     // Установка callback для обработки принятых пакетов
     void set_packet_callback(packet_callback_t callback);
     

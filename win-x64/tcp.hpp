@@ -41,6 +41,7 @@ public:
         , listen_sock(INVALID_SOCKET)
         , client_sock(INVALID_SOCKET)
         , tcp_connected(false)
+        , current_state(tcp_state_t::init)
         , rx_callback(nullptr)
     {
     }
@@ -85,6 +86,32 @@ public:
     bool is_connected() const
     {
         return tcp_connected.load();
+    }
+
+    // Получить текущее состояние TCP
+    tcp_state_t get_state() const
+    {
+        return current_state.load();
+    }
+
+    // Получить строковое представление состояния
+    std::string get_state_string() const
+    {
+        switch (current_state.load())
+        {
+        case tcp_state_t::init:
+            return "INIT";
+        case tcp_state_t::listening:
+            return "LISTENING";
+        case tcp_state_t::connected:
+            return "CONNECTED";
+        case tcp_state_t::lost:
+            return "LOST";
+        case tcp_state_t::retry:
+            return "RETRY";
+        default:
+            return "UNKNOWN";
+        }
     }
 
     // Установка callback для обработки принятых пакетов
@@ -205,6 +232,7 @@ private:
     SOCKET client_sock;
     std::thread worker;
     std::atomic<bool> tcp_connected;
+    std::atomic<tcp_state_t> current_state;  // Текущее состояние для мониторинга
     packet_callback_t rx_callback;
     
     // Буфер для накопления входящих данных
@@ -451,6 +479,7 @@ private:
         
         std::cout << "[tcp] Client socket closed, returning to listening state\n";
         // listen_sock остается открытым для нового соединения
+        // Состояние будет обновлено вызывающим кодом
     }
 
     bool connection_alive() const
@@ -538,10 +567,12 @@ private:
     {
         // Инициализация
         close_all();
+        current_state.store(tcp_state_t::init);
         
         if (tcp_init() != 0)
         {
             std::cerr << "[tcp] Initialization failed\n";
+            current_state.store(tcp_state_t::init);
             return;
         }
         
@@ -549,8 +580,11 @@ private:
         {
             std::cerr << "[tcp] Failed to start listening\n";
             close_all();
+            current_state.store(tcp_state_t::init);
             return;
         }
+        
+        current_state.store(tcp_state_t::listening);
         
         // Event-driven loop с select()
         fd_set readfds, errorfds;
@@ -620,6 +654,7 @@ private:
                         std::cout << "[tcp] New connection pending, accepting...\n";
                         if (accept_connection())
                         {
+                            current_state.store(tcp_state_t::connected);
                             read_initial_data();
                         }
                     }
@@ -630,7 +665,9 @@ private:
                     if (FD_ISSET(client_sock, &errorfds))
                     {
                         std::cout << "[tcp] Error detected on client socket\n";
+                        current_state.store(tcp_state_t::lost);
                         handle_connection_error();
+                        current_state.store(tcp_state_t::listening);
                     }
                     
                     if (FD_ISSET(client_sock, &readfds))
@@ -658,12 +695,14 @@ private:
                         int error_len = sizeof(error);
                         if (getsockopt(client_sock, SOL_SOCKET, SO_ERROR, (char*)&error, &error_len) == 0)
                         {
-                            if (error != 0)
-                            {
-                                std::cout << "[tcp] Connection error detected during timeout check: " << error << "\n";
-                                handle_connection_error();
-                                continue;
-                            }
+                        if (error != 0)
+                        {
+                            std::cout << "[tcp] Connection error detected during timeout check: " << error << "\n";
+                            current_state.store(tcp_state_t::lost);
+                            handle_connection_error();
+                            current_state.store(tcp_state_t::listening);
+                            continue;
+                        }
                         }
                         
                         // Проверяем наличие данных через recv с MSG_PEEK
@@ -679,7 +718,9 @@ private:
                         {
                             // Соединение закрыто
                             std::cout << "[tcp] Connection closed detected during timeout check\n";
+                            current_state.store(tcp_state_t::lost);
                             handle_connection_error();
+                            current_state.store(tcp_state_t::listening);
                         }
                         // peek_ret < 0 с WSAEWOULDBLOCK - данных нет, это нормально
                     }
@@ -697,6 +738,7 @@ private:
         u32 skip_count = 0;
         const u32 MAX_REASONABLE_PAYLOAD = 65535;
         const u32 MAX_SKIP_BEFORE_CLEAR = CMD_HEADER_LEN;
+        const u32 MAX_RAW_DATA_SIZE = 1024;  // Максимальный размер raw данных для обработки
         
         // Логируем первые байты буфера для отладки
         if (!rx_buffer.empty())
@@ -704,9 +746,63 @@ private:
             std::cout << "[tcp] RX buffer contents (first " << (rx_buffer.size() > 16 ? 16 : rx_buffer.size()) << " bytes): ";
             for (size_t i = 0; i < (rx_buffer.size() > 16 ? 16 : rx_buffer.size()); ++i)
             {
-                std::cout << std::hex << "0x" << (unsigned char)rx_buffer[i] << " " << std::dec;
+                std::cout << (unsigned char)rx_buffer[i] << " " << std::dec;
             }
             std::cout << "\n";
+        }
+        
+        // Если в буфере есть данные, но меньше CMD_HEADER_LEN, и буфер достаточно большой,
+        // возможно это raw данные, которые нужно обработать и очистить
+        if (rx_buffer.size() > 0 && rx_buffer.size() < CMD_HEADER_LEN && rx_buffer.size() <= MAX_RAW_DATA_SIZE)
+        {
+            // Пытаемся найти начало валидного CMD пакета, сканируя буфер
+            bool found_valid_packet = false;
+            size_t search_limit = (rx_buffer.size() > 100) ? 100 : rx_buffer.size();
+            
+            for (size_t offset = 0; offset <= search_limit && offset + CMD_HEADER_LEN <= rx_buffer.size(); ++offset)
+            {
+                const char* msg = rx_buffer.data() + offset;
+                cmdcode_t cmd_code_raw = static_cast<cmdcode_t>(msg[0] | (msg[1] << 8));
+                u32 payload_len_raw = static_cast<u32>(msg[2] | (msg[3] << 8) | (msg[4] << 16) | (msg[5] << 24));
+                
+                // Проверяем, является ли это валидным CMD кодом
+                if ((cmd_code_raw == CMD_WIN || cmd_code_raw == CMD_ESP || cmd_code_raw == CMD_STM ||
+                     cmd_code_raw == CMD_DPL || cmd_code_raw == CMD_MIC || cmd_code_raw == CMD_SPK) &&
+                    payload_len_raw <= MAX_REASONABLE_PAYLOAD)
+                {
+                    // Нашли потенциально валидный заголовок, но данных недостаточно
+                    // Обрабатываем данные до этого смещения как raw
+                    if (offset > 0)
+                    {
+                        std::cout << "[tcp] Found potential CMD packet at offset " << offset 
+                                  << ", treating " << offset << " bytes before as raw data\n";
+                        
+                        if (rx_callback)
+                        {
+                            rx_callback(CMD_RESERVED, rx_buffer.data(), static_cast<u32>(offset));
+                        }
+                        
+                        rx_buffer.erase(rx_buffer.begin(), rx_buffer.begin() + offset);
+                    }
+                    found_valid_packet = true;
+                    break;
+                }
+            }
+            
+            // Если не нашли валидный пакет и буфер маленький, обрабатываем как raw
+            if (!found_valid_packet && rx_buffer.size() <= MAX_RAW_DATA_SIZE)
+            {
+                std::cout << "[tcp] Small buffer (" << rx_buffer.size() 
+                          << " bytes) doesn't contain valid CMD header, treating as raw data\n";
+                
+                if (rx_callback && !rx_buffer.empty())
+                {
+                    rx_callback(CMD_RESERVED, rx_buffer.data(), static_cast<u32>(rx_buffer.size()));
+                }
+                
+                rx_buffer.clear();
+                return;
+            }
         }
         
         while (rx_buffer.size() >= CMD_HEADER_LEN)
@@ -730,7 +826,14 @@ private:
                 
                 if (skip_count >= MAX_SKIP_BEFORE_CLEAR)
                 {
-                    std::cerr << "[tcp] Too many invalid bytes, clearing RX buffer completely\n";
+                    std::cerr << "[tcp] Too many invalid bytes, treating as raw data and clearing\n";
+                    
+                    // Обрабатываем как raw данные перед очисткой
+                    if (rx_callback && !rx_buffer.empty())
+                    {
+                        rx_callback(CMD_RESERVED, rx_buffer.data(), static_cast<u32>(rx_buffer.size()));
+                    }
+                    
                     rx_buffer.clear();
                     skip_count = 0;
                     break;
@@ -799,34 +902,66 @@ private:
                 std::cerr << "[tcp] Invalid packet format - CMD format check FAILED\n";
                 std::cerr << "  Header CMD Code: 0x" << std::hex << cmd_code_raw << std::dec << "\n";
                 std::cerr << "  Header Payload Length: " << payload_len_raw << "\n";
-                std::cerr << "  Skipping byte and retrying... (skip_count=" << skip_count << ")\n";
                 
+                // Если накопилось много пропусков, пытаемся найти начало валидного пакета
                 if (skip_count >= MAX_SKIP_BEFORE_CLEAR)
                 {
-                    // После нескольких попыток парсинга как CMD, обрабатываем данные как raw
-                    std::cout << "[tcp] Data doesn't match CMD format, treating as raw data\n";
-                    std::cout << "[tcp] Raw data size: " << rx_buffer.size() << " bytes\n";
+                    // Ищем начало валидного CMD пакета в буфере
+                    bool found_valid = false;
+                    size_t search_start = 1;
+                    size_t search_limit = (rx_buffer.size() > 200) ? 200 : rx_buffer.size();
                     
-                    // Обрабатываем весь буфер как raw данные
-                    if (rx_callback && !rx_buffer.empty())
+                    for (size_t offset = search_start; offset + CMD_HEADER_LEN <= rx_buffer.size() && offset < search_limit; ++offset)
                     {
-                        // Используем CMD_RESERVED для raw данных
-                        rx_callback(CMD_RESERVED, rx_buffer.data(), static_cast<u32>(rx_buffer.size()));
+                        const char* test_msg = rx_buffer.data() + offset;
+                        cmdcode_t test_cmd = static_cast<cmdcode_t>(test_msg[0] | (test_msg[1] << 8));
+                        u32 test_len = static_cast<u32>(test_msg[2] | (test_msg[3] << 8) | (test_msg[4] << 16) | (test_msg[5] << 24));
+                        
+                        if ((test_cmd == CMD_WIN || test_cmd == CMD_ESP || test_cmd == CMD_STM ||
+                             test_cmd == CMD_DPL || test_cmd == CMD_MIC || test_cmd == CMD_SPK) &&
+                            test_len <= MAX_REASONABLE_PAYLOAD)
+                        {
+                            // Нашли потенциально валидный заголовок
+                            std::cout << "[tcp] Found potential valid CMD packet at offset " << offset 
+                                      << ", treating " << offset << " bytes before as raw data\n";
+                            
+                            // Обрабатываем данные до этого смещения как raw
+                            if (rx_callback && offset > 0)
+                            {
+                                rx_callback(CMD_RESERVED, rx_buffer.data(), static_cast<u32>(offset));
+                            }
+                            
+                            rx_buffer.erase(rx_buffer.begin(), rx_buffer.begin() + offset);
+                            skip_count = 0;
+                            found_valid = true;
+                            break;
+                        }
                     }
                     
-                    rx_buffer.clear();
-                    skip_count = 0;
-                    break;
+                    if (!found_valid)
+                    {
+                        // Не нашли валидный пакет, обрабатываем весь буфер как raw
+                        std::cout << "[tcp] Data doesn't match CMD format, treating entire buffer as raw data\n";
+                        std::cout << "[tcp] Raw data size: " << rx_buffer.size() << " bytes\n";
+                        
+                        if (rx_callback && !rx_buffer.empty())
+                        {
+                            rx_callback(CMD_RESERVED, rx_buffer.data(), static_cast<u32>(rx_buffer.size()));
+                        }
+                        
+                        rx_buffer.clear();
+                        skip_count = 0;
+                        break;
+                    }
                 }
-                
-                rx_buffer.erase(rx_buffer.begin());
-                continue;
+                else
+                {
+                    std::cerr << "  Skipping byte and retrying... (skip_count=" << skip_count << ")\n";
+                    rx_buffer.erase(rx_buffer.begin());
+                    continue;
+                }
             }
         }
-        
-        // Если в буфере остались данные меньше CMD_HEADER_LEN, но они не парсятся как CMD,
-        // возможно это raw данные. Обрабатываем их, если буфер не пуст и прошло достаточно времени.
-        // Но для простоты, если буфер меньше CMD_HEADER_LEN, просто ждем больше данных
     }
 };
 
