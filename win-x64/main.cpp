@@ -103,7 +103,14 @@ void handle_packet(cmdcode_t cmd_code, const char* payload, u32 payload_len)
     case CMD_SPK:
         std::cout << ANSI_SUCC << "  Type: Speaker data" << ANSI_ENDL << std::endl;
         break;
+    case CMD_RESERVED:
+        std::cout << ANSI_SUCC << "  Type: Raw data (not CMD format)" << ANSI_ENDL << std::endl;
+        break;
     default:
+        if (cmd_code != CMD_RESERVED)
+        {
+            std::cout << ANSI_SUCC << "  Type: Unknown command code" << ANSI_ENDL << std::endl;
+        }
         break;
     }
 }

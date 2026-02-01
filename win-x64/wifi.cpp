@@ -137,6 +137,14 @@ bool wifi_t::accept_connection(void)
         return false;
     }
 
+    // Включаем TCP keepalive для автоматического обнаружения разрыва
+    BOOL keepalive = TRUE;
+    if (setsockopt(client_sock, SOL_SOCKET, SO_KEEPALIVE, 
+                  (char*)&keepalive, sizeof(keepalive)) == SOCKET_ERROR)
+    {
+        std::cerr << "[wifi] Failed to set SO_KEEPALIVE: " << WSAGetLastError() << "\n";
+    }
+
     char ip[INET_ADDRSTRLEN];
     inet_ntop(AF_INET, &client_addr.sin_addr, ip, sizeof(ip));
 
@@ -148,16 +156,62 @@ bool wifi_t::connection_alive(void) const
 {
     if (client_sock == INVALID_SOCKET) return false;
 
-    char tmp;
-    int ret = recv(client_sock, &tmp, 1, MSG_PEEK);
-
-    if (ret == 0) return false;
-    if (ret == SOCKET_ERROR)
+    // Проверка 1: getsockopt(SO_ERROR) - проверяет ошибки на сокете
+    int error = 0;
+    int error_len = sizeof(error);
+    if (getsockopt(client_sock, SOL_SOCKET, SO_ERROR, (char*)&error, &error_len) == 0)
     {
-        int err = WSAGetLastError();
-        return (err == WSAEWOULDBLOCK || err == WSAEINPROGRESS);
+        if (error != 0)
+        {
+            // Есть ошибка на сокете - соединение разорвано
+            return false;
+        }
     }
 
+    // Проверка 2: select() для проверки состояния сокета
+    fd_set readfds, errorfds;
+    FD_ZERO(&readfds);
+    FD_ZERO(&errorfds);
+    FD_SET(client_sock, &readfds);
+    FD_SET(client_sock, &errorfds);
+    
+    timeval timeout{};
+    timeout.tv_sec = 0;
+    timeout.tv_usec = 0;
+    
+    int ret = select(0, &readfds, nullptr, &errorfds, &timeout);
+    
+    if (ret == SOCKET_ERROR)
+    {
+        return false;  // Ошибка select
+    }
+    
+    if (FD_ISSET(client_sock, &errorfds))
+    {
+        return false;  // Ошибка на сокете
+    }
+    
+    // Проверка 3: recv(MSG_PEEK) для проверки закрытия соединения
+    if (FD_ISSET(client_sock, &readfds))
+    {
+        char tmp;
+        int recv_ret = recv(client_sock, &tmp, 1, MSG_PEEK);
+        
+        if (recv_ret == 0)
+        {
+            return false;  // Соединение закрыто
+        }
+        
+        if (recv_ret == SOCKET_ERROR)
+        {
+            int err = WSAGetLastError();
+            if (err != WSAEWOULDBLOCK && err != WSAEINPROGRESS)
+            {
+                return false;  // Реальная ошибка
+            }
+        }
+    }
+    
     return true;
 }
 
@@ -231,8 +285,49 @@ void wifi_t::run(void)
             if (accept_connection())
             {
                 g_wifi_up.store(true);
+                auto last_health_check = std::chrono::steady_clock::now();
+                const auto health_check_interval = std::chrono::seconds(2);  // Проверка каждые 2 секунды
+                
                 while (g_running->load() && connection_alive())
                 {
+                    auto now = std::chrono::steady_clock::now();
+                    
+                    // Периодическая активная проверка соединения
+                    if (now - last_health_check >= health_check_interval)
+                    {
+                        last_health_check = now;
+                        
+                        // Попытка проверить состояние сокета через getsockopt
+                        int error = 0;
+                        int error_len = sizeof(error);
+                        if (getsockopt(client_sock, SOL_SOCKET, SO_ERROR, (char*)&error, &error_len) == 0)
+                        {
+                            if (error != 0)
+                            {
+                                std::cerr << "[wifi] Socket error detected by health check: " << error << "\n";
+                                break;  // Выходим из цикла, переходим в lost
+                            }
+                        }
+                        
+                        // Дополнительная проверка: пытаемся прочитать с MSG_PEEK
+                        char tmp;
+                        int peek_ret = recv(client_sock, &tmp, 1, MSG_PEEK);
+                        if (peek_ret == 0)
+                        {
+                            std::cout << "[wifi] Connection closed detected by health check\n";
+                            break;
+                        }
+                        else if (peek_ret == SOCKET_ERROR)
+                        {
+                            int err = WSAGetLastError();
+                            if (err != WSAEWOULDBLOCK && err != WSAEINPROGRESS)
+                            {
+                                std::cerr << "[wifi] Connection error detected by health check: " << err << "\n";
+                                break;
+                            }
+                        }
+                    }
+                    
                     std::this_thread::sleep_for(std::chrono::milliseconds(400));
                 }
                 g_wifi_up.store(false);
@@ -240,6 +335,12 @@ void wifi_t::run(void)
             }
             else
             {
+                // Закрываем listen_sock при ошибке accept
+                if (listen_sock != INVALID_SOCKET)
+                {
+                    closesocket(listen_sock);
+                    listen_sock = INVALID_SOCKET;
+                }
                 state = wifi_state_t::retry;
             }
             break;

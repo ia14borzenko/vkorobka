@@ -4,6 +4,7 @@
 #define _WINSOCK_DEPRECATED_NO_WARNINGS
 #include <winsock2.h>
 #include <ws2tcpip.h>
+#include <mstcpip.h>  // Для TCP_KEEPIDLE, TCP_KEEPINTVL, TCP_KEEPCNT
 #include <iostream>
 #include <thread>
 #include <atomic>
@@ -100,26 +101,50 @@ public:
 
     bool send(const char* data, int len)
     {
-        if (!is_connected() || client_sock == INVALID_SOCKET)
+        // Проверяем только наличие сокета и флаг соединения
+        if (client_sock == INVALID_SOCKET || !tcp_connected.load())
         {
-            std::cerr << "[tcp] Cannot send: not connected\n";
+            std::cerr << "[tcp] Cannot send: not connected (socket: " << client_sock << ", connected: " << tcp_connected.load() << ")\n";
             return false;
         }
 
+        // Дополнительная проверка: убеждаемся, что сокет действительно активен
+        // Это важно, так как соединение может быть разорвано между проверкой и отправкой
+        int error = 0;
+        int error_len = sizeof(error);
+        if (getsockopt(client_sock, SOL_SOCKET, SO_ERROR, (char*)&error, &error_len) == 0)
+        {
+            if (error != 0)
+            {
+                std::cerr << "[tcp] Socket has error " << error << " before send, closing connection\n";
+                handle_connection_error();
+                return false;
+            }
+        }
+
+        std::cout << "[tcp] Sending " << len << " bytes to socket " << client_sock << "\n";
         int sent = ::send(client_sock, data, len, 0);
         if (sent == SOCKET_ERROR)
         {
-            std::cerr << "[tcp] Send failed: " << WSAGetLastError() << "\n";
+            int err = WSAGetLastError();
+            std::cerr << "[tcp] Send failed on socket " << client_sock << ": " << err << "\n";
+            // Если ошибка критическая, обновляем состояние
+            if (err == WSAENOTCONN || err == WSAECONNRESET || err == WSAECONNABORTED)
+            {
+                handle_connection_error();
+            }
             return false;
         }
 
+        std::cout << "[tcp] Successfully sent " << sent << " bytes\n";
         return sent == len;
     }
 
     // Отправка пакета в формате CMD (с автоматической упаковкой)
     bool send_packet(cmdcode_t cmd_code, const void* payload, u32 payload_len)
     {
-        if (!is_connected() || client_sock == INVALID_SOCKET)
+        // Проверяем только наличие сокета и флаг соединения
+        if (client_sock == INVALID_SOCKET || !tcp_connected.load())
         {
             std::cerr << "[tcp] Cannot send packet: not connected\n";
             return false;
@@ -145,12 +170,19 @@ public:
             int sent = ::send(client_sock, ptr, remaining, 0);
             if (sent == SOCKET_ERROR)
             {
-                std::cerr << "[tcp] Send packet failed: " << WSAGetLastError() << "\n";
+                int err = WSAGetLastError();
+                std::cerr << "[tcp] Send packet failed: " << err << "\n";
+                // Если ошибка критическая, обновляем состояние
+                if (err == WSAENOTCONN || err == WSAECONNRESET || err == WSAECONNABORTED)
+                {
+                    handle_connection_error();
+                }
                 return false;
             }
             if (sent == 0)
             {
                 std::cerr << "[tcp] Connection closed during send\n";
+                handle_connection_error();
                 return false;
             }
             
@@ -197,6 +229,10 @@ private:
 
         char opt = 1;
         setsockopt(listen_sock, SOL_SOCKET, SO_REUSEADDR, &opt, sizeof(opt));
+        
+        // Устанавливаем listen_sock в неблокирующий режим для неблокирующего accept()
+        u_long mode = 1;
+        ioctlsocket(listen_sock, FIONBIO, &mode);
 
         return 0;
     }
@@ -226,37 +262,257 @@ private:
 
     bool accept_connection()
     {
+        // Закрываем старое соединение, если оно есть
+        if (client_sock != INVALID_SOCKET)
+        {
+            std::cout << "[tcp] Closing old connection before accepting new one\n";
+            closesocket(client_sock);
+            client_sock = INVALID_SOCKET;
+            tcp_connected.store(false);
+        }
+        
         sockaddr_in client_addr{};
         int len = sizeof(client_addr);
 
+        // Блокирующий accept (вызывается только когда select() показал готовность)
         client_sock = accept(listen_sock, (sockaddr*)&client_addr, &len);
         if (client_sock == INVALID_SOCKET)
         {
-            std::cerr << "[tcp] accept failed: " << WSAGetLastError() << "\n";
+            int err = WSAGetLastError();
+            std::cerr << "[tcp] accept failed: " << err << "\n";
             return false;
         }
+
+        // Включаем TCP keepalive для автоматического обнаружения разрыва
+        BOOL keepalive = TRUE;
+        if (setsockopt(client_sock, SOL_SOCKET, SO_KEEPALIVE, 
+                      (char*)&keepalive, sizeof(keepalive)) == SOCKET_ERROR)
+        {
+            std::cerr << "[tcp] Failed to set SO_KEEPALIVE: " << WSAGetLastError() << "\n";
+        }
+        
+        // Настраиваем параметры TCP keepalive для быстрого обнаружения разрыва (~5 секунд)
+        // TCP_KEEPIDLE: время до первого keepalive probe (2 секунды)
+        // TCP_KEEPINTVL: интервал между probes (1 секунда)
+        // TCP_KEEPCNT: количество неудачных probes до разрыва (3)
+        // Итого: 2 + 1*3 = 5 секунд до обнаружения разрыва
+        DWORD keepidle = 2;      // 2 секунды до первого probe
+        DWORD keepintvl = 1;     // 1 секунда между probes
+        DWORD keepcount = 3;     // 3 неудачных probe = разрыв
+        
+        if (setsockopt(client_sock, IPPROTO_TCP, TCP_KEEPIDLE, 
+                      (char*)&keepidle, sizeof(keepidle)) == SOCKET_ERROR)
+        {
+            std::cerr << "[tcp] Failed to set TCP_KEEPIDLE: " << WSAGetLastError() << "\n";
+        }
+        
+        if (setsockopt(client_sock, IPPROTO_TCP, TCP_KEEPINTVL, 
+                      (char*)&keepintvl, sizeof(keepintvl)) == SOCKET_ERROR)
+        {
+            std::cerr << "[tcp] Failed to set TCP_KEEPINTVL: " << WSAGetLastError() << "\n";
+        }
+        
+        if (setsockopt(client_sock, IPPROTO_TCP, TCP_KEEPCNT, 
+                      (char*)&keepcount, sizeof(keepcount)) == SOCKET_ERROR)
+        {
+            std::cerr << "[tcp] Failed to set TCP_KEEPCNT: " << WSAGetLastError() << "\n";
+        }
+        
+        std::cout << "[tcp] TCP keepalive configured: idle=2s, interval=1s, count=3 (~5s detection)\n";
+        
+        // Устанавливаем client_sock в неблокирующий режим
+        u_long mode = 1;
+        ioctlsocket(client_sock, FIONBIO, &mode);
 
         char ip[INET_ADDRSTRLEN];
         inet_ntop(AF_INET, &client_addr.sin_addr, ip, sizeof(ip));
 
-        std::cout << "[tcp] Connected: " << ip << ":" << ntohs(client_addr.sin_port) << "\n";
+        std::cout << "[tcp] Connection accepted from " << ip << ":" << ntohs(client_addr.sin_port) << " (socket: " << client_sock << ")\n";
+        
+        tcp_connected.store(true);
+        rx_buffer.clear();
+        
         return true;
+    }
+    
+    void read_initial_data()
+    {
+        std::cout << "[tcp] Reading initial data after accept (socket: " << client_sock << ")...\n";
+        // Чтение всех доступных данных сразу после accept
+        char initial_rx[4096];
+        bool data_received = false;
+        
+        // Читаем в цикле пока есть данные (неблокирующий recv)
+        while (true)
+        {
+            int initial_len = recv(client_sock, initial_rx, sizeof(initial_rx), 0);
+            
+            if (initial_len > 0)
+            {
+                std::cout << "[tcp] Received " << initial_len << " bytes (initial data after accept)\n";
+                rx_buffer.insert(rx_buffer.end(), initial_rx, initial_rx + initial_len);
+                data_received = true;
+                // Продолжаем читать, пока есть данные
+            }
+            else if (initial_len == 0)
+            {
+                // Соединение закрыто сразу после accept
+                std::cout << "[tcp] Connection closed immediately after accept\n";
+                closesocket(client_sock);
+                client_sock = INVALID_SOCKET;
+                tcp_connected.store(false);
+                return;
+            }
+            else
+            {
+                // WSAEWOULDBLOCK - данных больше нет
+                int err = WSAGetLastError();
+                if (err == WSAEWOULDBLOCK)
+                {
+                    if (!data_received)
+                    {
+                        std::cout << "[tcp] No initial data available (WSAEWOULDBLOCK)\n";
+                    }
+                    break;
+                }
+                else
+                {
+                    std::cerr << "[tcp] Error reading initial data: " << err << "\n";
+                    return;
+                }
+            }
+        }
+        
+        // Обрабатываем начальные данные
+        if (!rx_buffer.empty())
+        {
+            std::cout << "[tcp] Processing " << rx_buffer.size() << " bytes of initial data\n";
+            process_rx_buffer();
+        }
+        else
+        {
+            std::cout << "[tcp] No initial data to process\n";
+        }
+    }
+    
+    void read_and_process_data()
+    {
+        // Чтение данных в цикле пока есть данные (неблокирующий recv)
+        char rx_raw[4096];
+        
+        while (true)
+        {
+            int len = recv(client_sock, rx_raw, sizeof(rx_raw), 0);
+            
+            if (len > 0)
+            {
+                std::cout << "[tcp] Received " << len << " bytes from client\n";
+                rx_buffer.insert(rx_buffer.end(), rx_raw, rx_raw + len);
+                process_rx_buffer();
+            }
+            else if (len == 0)
+            {
+                // Соединение закрыто клиентом
+                std::cout << "[tcp] Connection closed by client (recv returned 0)\n";
+                handle_connection_error();
+                return;
+            }
+            else
+            {
+                // WSAEWOULDBLOCK - данных больше нет
+                int err = WSAGetLastError();
+                if (err == WSAEWOULDBLOCK)
+                {
+                    // Все данные прочитаны
+                    break;
+                }
+                else
+                {
+                    std::cerr << "[tcp] recv error: " << err << "\n";
+                    handle_connection_error();
+                    return;
+                }
+            }
+        }
+    }
+    
+    void handle_connection_error()
+    {
+        std::cout << "[tcp] Handling connection error, closing client socket\n";
+        // Закрываем client_sock и возвращаемся к listening
+        tcp_connected.store(false);
+        rx_buffer.clear();
+        
+        if (client_sock != INVALID_SOCKET)
+        {
+            closesocket(client_sock);
+            client_sock = INVALID_SOCKET;
+        }
+        
+        std::cout << "[tcp] Client socket closed, returning to listening state\n";
+        // listen_sock остается открытым для нового соединения
     }
 
     bool connection_alive() const
     {
         if (client_sock == INVALID_SOCKET) return false;
 
-        char tmp;
-        int ret = recv(client_sock, &tmp, 1, MSG_PEEK);
-
-        if (ret == 0) return false;                    // graceful close
-        if (ret == SOCKET_ERROR)
+        // Проверка 1: getsockopt(SO_ERROR) - проверяет ошибки на сокете
+        int error = 0;
+        int error_len = sizeof(error);
+        if (getsockopt(client_sock, SOL_SOCKET, SO_ERROR, (char*)&error, &error_len) == 0)
         {
-            int err = WSAGetLastError();
-            return (err == WSAEWOULDBLOCK || err == WSAEINPROGRESS);
+            if (error != 0)
+            {
+                // Есть ошибка на сокете - соединение разорвано
+                return false;
+            }
         }
 
+        // Проверка 2: select() для проверки состояния сокета
+        fd_set readfds, errorfds;
+        FD_ZERO(&readfds);
+        FD_ZERO(&errorfds);
+        FD_SET(client_sock, &readfds);
+        FD_SET(client_sock, &errorfds);
+        
+        timeval timeout{};
+        timeout.tv_sec = 0;
+        timeout.tv_usec = 0;
+        
+        int ret = select(0, &readfds, nullptr, &errorfds, &timeout);
+        
+        if (ret == SOCKET_ERROR)
+        {
+            return false;  // Ошибка select
+        }
+        
+        if (FD_ISSET(client_sock, &errorfds))
+        {
+            return false;  // Ошибка на сокете
+        }
+        
+        // Проверка 3: recv(MSG_PEEK) для проверки закрытия соединения
+        if (FD_ISSET(client_sock, &readfds))
+        {
+            char tmp;
+            int recv_ret = recv(client_sock, &tmp, 1, MSG_PEEK);
+            
+            if (recv_ret == 0)
+            {
+                return false;  // Соединение закрыто
+            }
+            
+            if (recv_ret == SOCKET_ERROR)
+            {
+                int err = WSAGetLastError();
+                if (err != WSAEWOULDBLOCK && err != WSAEINPROGRESS)
+                {
+                    return false;  // Реальная ошибка
+                }
+            }
+        }
+        
         return true;
     }
 
@@ -280,111 +536,157 @@ private:
 
     void run()
     {
-        tcp_state_t state = tcp_state_t::init;
-
+        // Инициализация
+        close_all();
+        
+        if (tcp_init() != 0)
+        {
+            std::cerr << "[tcp] Initialization failed\n";
+            return;
+        }
+        
+        if (!start_listening())
+        {
+            std::cerr << "[tcp] Failed to start listening\n";
+            close_all();
+            return;
+        }
+        
+        // Event-driven loop с select()
+        fd_set readfds, errorfds;
+        
         while (g_running && g_running->load())
         {
-            switch (state)
+            FD_ZERO(&readfds);
+            FD_ZERO(&errorfds);
+            
+            // Мониторим listen_sock (если нет клиента) или client_sock (если есть)
+            if (client_sock == INVALID_SOCKET)
             {
-            case tcp_state_t::init:
-            {
-                if (tcp_init() == 0)
+                // Ожидаем новое соединение
+                if (listen_sock != INVALID_SOCKET)
                 {
-                    state = tcp_state_t::listening;
+                    FD_SET(listen_sock, &readfds);
+                    FD_SET(listen_sock, &errorfds);
                 }
-                else
-                {
-                    state = tcp_state_t::retry;
-                }
-                break;
             }
-
-            case tcp_state_t::listening:
+            else
             {
-                if (start_listening())
-                {
-                    state = tcp_state_t::connected;
-                }
-                else
-                {
-                    state = tcp_state_t::retry;
-                }
-                break;
+                // Ожидаем данные от клиента
+                FD_SET(client_sock, &readfds);
+                FD_SET(client_sock, &errorfds);
             }
-
-            case tcp_state_t::connected:
+            
+            // Timeout для select (100ms)
+            timeval timeout;
+            timeout.tv_sec = 0;
+            timeout.tv_usec = 100000;
+            
+            int ret = select(0, &readfds, nullptr, &errorfds, &timeout);
+            
+            if (ret == SOCKET_ERROR)
             {
-                if (accept_connection())
+                int err = WSAGetLastError();
+                std::cerr << "[tcp] select error: " << err << "\n";
+                std::this_thread::sleep_for(std::chrono::milliseconds(100));
+                continue;
+            }
+            
+            if (ret > 0)
+            {
+                // Есть события для обработки
+                if (client_sock == INVALID_SOCKET)
                 {
-                    tcp_connected.store(true);
-                    rx_buffer.clear();  // Очищаем буфер при новом соединении
-                    
-                    // Устанавливаем сокет в неблокирующий режим для чтения
-                    u_long mode = 1;
-                    ioctlsocket(client_sock, FIONBIO, &mode);
-                    
-                    char rx_raw[4096];  // Буфер для чтения из сокета
-                    
-                    while (g_running && g_running->load() && connection_alive())
+                    // Обработка listen_sock
+                    if (FD_ISSET(listen_sock, &errorfds))
                     {
-                        // Читаем входящие данные
-                        int len = recv(client_sock, rx_raw, sizeof(rx_raw), 0);
-                        
-                        if (len > 0)
+                        std::cerr << "[tcp] Error on listen socket\n";
+                        // Переинициализация
+                        close_all();
+                        if (tcp_init() == 0 && start_listening())
                         {
-                            // Добавляем данные в буфер
-                            rx_buffer.insert(rx_buffer.end(), rx_raw, rx_raw + len);
-                            
-                            // Обрабатываем все полные пакеты из буфера
-                            process_rx_buffer();
-                        }
-                        else if (len == 0)
-                        {
-                            // Соединение закрыто клиентом
-                            std::cout << "[tcp] Connection closed by client\n";
-                            break;
+                            continue;
                         }
                         else
                         {
-                            // Ошибка или нет данных (WSAEWOULDBLOCK)
-                            int err = WSAGetLastError();
-                            if (err != WSAEWOULDBLOCK && err != WSAEINPROGRESS)
-                            {
-                                std::cerr << "[tcp] recv error: " << err << "\n";
-                                break;
-                            }
+                            std::this_thread::sleep_for(std::chrono::seconds(3));
+                            continue;
                         }
-                        
-                        std::this_thread::sleep_for(std::chrono::milliseconds(10));
                     }
                     
-                    tcp_connected.store(false);
-                    rx_buffer.clear();
-                    state = tcp_state_t::lost;
+                    if (FD_ISSET(listen_sock, &readfds))
+                    {
+                        // Готово к accept
+                        std::cout << "[tcp] New connection pending, accepting...\n";
+                        if (accept_connection())
+                        {
+                            read_initial_data();
+                        }
+                    }
                 }
                 else
                 {
-                    state = tcp_state_t::retry;
+                    // Обработка client_sock
+                    if (FD_ISSET(client_sock, &errorfds))
+                    {
+                        std::cout << "[tcp] Error detected on client socket\n";
+                        handle_connection_error();
+                    }
+                    
+                    if (FD_ISSET(client_sock, &readfds))
+                    {
+                        std::cout << "[tcp] Data available on client socket\n";
+                        read_and_process_data();
+                    }
                 }
-                break;
             }
-
-            case tcp_state_t::lost:
+            else if (ret == 0)
             {
-                close_all();
-                state = tcp_state_t::retry;
-                break;
-            }
-
-            case tcp_state_t::retry:
-            {
-                std::this_thread::sleep_for(std::chrono::seconds(3));
-                state = tcp_state_t::init;
-                break;
-            }
+                // Timeout - проверяем наличие данных и состояние соединения
+                // Это важно, так как данные могут прийти между вызовами select()
+                if (client_sock != INVALID_SOCKET && tcp_connected.load())
+                {
+                    // Периодическая проверка наличия данных и состояния соединения (каждые 5 циклов = ~0.5 секунды)
+                    static int timeout_count = 0;
+                    timeout_count++;
+                    if (timeout_count >= 5)
+                    {
+                        timeout_count = 0;
+                        
+                        // Сначала проверяем состояние соединения
+                        int error = 0;
+                        int error_len = sizeof(error);
+                        if (getsockopt(client_sock, SOL_SOCKET, SO_ERROR, (char*)&error, &error_len) == 0)
+                        {
+                            if (error != 0)
+                            {
+                                std::cout << "[tcp] Connection error detected during timeout check: " << error << "\n";
+                                handle_connection_error();
+                                continue;
+                            }
+                        }
+                        
+                        // Проверяем наличие данных через recv с MSG_PEEK
+                        char tmp;
+                        int peek_ret = recv(client_sock, &tmp, 1, MSG_PEEK);
+                        if (peek_ret > 0)
+                        {
+                            // Есть данные, читаем их
+                            std::cout << "[tcp] Data detected during timeout check, reading...\n";
+                            read_and_process_data();
+                        }
+                        else if (peek_ret == 0)
+                        {
+                            // Соединение закрыто
+                            std::cout << "[tcp] Connection closed detected during timeout check\n";
+                            handle_connection_error();
+                        }
+                        // peek_ret < 0 с WSAEWOULDBLOCK - данных нет, это нормально
+                    }
+                }
             }
         }
-
+        
         close_all();
         std::cout << "[tcp] Server thread stopped\n";
     }
@@ -392,6 +694,21 @@ private:
     // Обработка буфера входящих данных - извлечение полных пакетов
     void process_rx_buffer()
     {
+        u32 skip_count = 0;
+        const u32 MAX_REASONABLE_PAYLOAD = 65535;
+        const u32 MAX_SKIP_BEFORE_CLEAR = CMD_HEADER_LEN;
+        
+        // Логируем первые байты буфера для отладки
+        if (!rx_buffer.empty())
+        {
+            std::cout << "[tcp] RX buffer contents (first " << (rx_buffer.size() > 16 ? 16 : rx_buffer.size()) << " bytes): ";
+            for (size_t i = 0; i < (rx_buffer.size() > 16 ? 16 : rx_buffer.size()); ++i)
+            {
+                std::cout << std::hex << "0x" << (unsigned char)rx_buffer[i] << " " << std::dec;
+            }
+            std::cout << "\n";
+        }
+        
         while (rx_buffer.size() >= CMD_HEADER_LEN)
         {
             // Проверяем, есть ли полный заголовок
@@ -405,21 +722,38 @@ private:
             u32 payload_len_raw = static_cast<u32>(msg[2] | (msg[3] << 8) | (msg[4] << 16) | (msg[5] << 24));
             
             // Проверка на разумность payload_len перед дальнейшей обработкой
-            const u32 MAX_REASONABLE_PAYLOAD = 65535;
             if (payload_len_raw > MAX_REASONABLE_PAYLOAD)
             {
-                // payload_len явно невалидный, пропускаем один байт
-                std::cerr << "[tcp] Invalid payload length: " << payload_len_raw << ", skipping byte\n";
+                skip_count++;
+                std::cerr << "[tcp] Invalid payload length: " << payload_len_raw 
+                         << " (too large), skipping byte (skip_count=" << skip_count << ")\n";
+                
+                if (skip_count >= MAX_SKIP_BEFORE_CLEAR)
+                {
+                    std::cerr << "[tcp] Too many invalid bytes, clearing RX buffer completely\n";
+                    rx_buffer.clear();
+                    skip_count = 0;
+                    break;
+                }
+                
                 rx_buffer.erase(rx_buffer.begin());
                 continue;
             }
             
             u32 expected_total = CMD_HEADER_LEN + payload_len_raw;
             
+            std::cout << "[tcp] Checking packet header:\n";
+            std::cout << "  CMD Code: 0x" << std::hex << cmd_code_raw << std::dec << "\n";
+            std::cout << "  Payload length (from header): " << payload_len_raw << " bytes\n";
+            std::cout << "  Expected total packet size: " << expected_total << " bytes\n";
+            std::cout << "  Current buffer size: " << msg_len << " bytes\n";
+            
             // Проверяем, есть ли полный пакет
             if (msg_len < expected_total)
             {
                 // Недостаточно данных для полного пакета, ждем еще
+                std::cout << "[tcp] Incomplete packet, waiting for more data (need " 
+                         << (expected_total - msg_len) << " more bytes)\n";
                 break;
             }
             
@@ -430,6 +764,12 @@ private:
             
             if (cmd_code != CMD_RESERVED)
             {
+                skip_count = 0;
+                
+                std::cout << "[tcp] CMD format check PASSED\n";
+                std::cout << "  Valid CMD Code: 0x" << std::hex << cmd_code << std::dec << "\n";
+                std::cout << "  Payload length: " << payload_len << " bytes\n";
+                
                 // Полный пакет получен и распарсен
                 // Вызываем callback с данными пакета
                 if (rx_callback)
@@ -444,17 +784,49 @@ private:
                         rx_callback(cmd_code, nullptr, 0);
                     }
                 }
+                else
+                {
+                    std::cerr << "[tcp] WARNING: rx_callback is null!\n";
+                }
                 
                 // Удаляем обработанный пакет из буфера
                 rx_buffer.erase(rx_buffer.begin(), rx_buffer.begin() + expected_total);
+                continue;
             }
             else
             {
-                // Неверный формат пакета, пропускаем один байт и пытаемся снова
-                std::cerr << "[tcp] Invalid packet format, skipping byte\n";
+                skip_count++;
+                std::cerr << "[tcp] Invalid packet format - CMD format check FAILED\n";
+                std::cerr << "  Header CMD Code: 0x" << std::hex << cmd_code_raw << std::dec << "\n";
+                std::cerr << "  Header Payload Length: " << payload_len_raw << "\n";
+                std::cerr << "  Skipping byte and retrying... (skip_count=" << skip_count << ")\n";
+                
+                if (skip_count >= MAX_SKIP_BEFORE_CLEAR)
+                {
+                    // После нескольких попыток парсинга как CMD, обрабатываем данные как raw
+                    std::cout << "[tcp] Data doesn't match CMD format, treating as raw data\n";
+                    std::cout << "[tcp] Raw data size: " << rx_buffer.size() << " bytes\n";
+                    
+                    // Обрабатываем весь буфер как raw данные
+                    if (rx_callback && !rx_buffer.empty())
+                    {
+                        // Используем CMD_RESERVED для raw данных
+                        rx_callback(CMD_RESERVED, rx_buffer.data(), static_cast<u32>(rx_buffer.size()));
+                    }
+                    
+                    rx_buffer.clear();
+                    skip_count = 0;
+                    break;
+                }
+                
                 rx_buffer.erase(rx_buffer.begin());
+                continue;
             }
         }
+        
+        // Если в буфере остались данные меньше CMD_HEADER_LEN, но они не парсятся как CMD,
+        // возможно это raw данные. Обрабатываем их, если буфер не пуст и прошло достаточно времени.
+        // Но для простоты, если буфер меньше CMD_HEADER_LEN, просто ждем больше данных
     }
 };
 
