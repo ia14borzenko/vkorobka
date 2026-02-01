@@ -36,6 +36,10 @@ static udp_api_t* g_udp_api = nullptr;
 static std::map<std::string, std::pair<std::string, int>> g_test_clients;
 static std::mutex g_test_clients_mutex;
 
+// Хранилище соответствия между destination (ESP32/STM32) и test_id для отслеживания запросов
+static std::map<msg_destination_t, std::string> g_destination_to_test_id;
+static std::mutex g_destination_to_test_id_mutex;
+
 void console_thread()
 {
     std::cout << "'help' for command list\n" << ANSI_ENDL;
@@ -55,6 +59,7 @@ void console_thread()
         cctx_t ctx;
         ctx.tcp = g_tcp_ptr;  // Передаем указатель на TCP объект
         ctx.wifi = g_wifi_ptr;  // Передаем указатель на WiFi объект
+        ctx.message_router = g_message_router;  // Передаем указатель на message_router
 
         parse_line(line, cmd_name, ctx);
 
@@ -75,7 +80,7 @@ void console_thread()
 
 static tcp_t tcp(&g_running);
 static wifi_t wifi(&g_running);
-message_router_t message_router;  // Убрано static для доступа из tcp.cpp
+static message_router_t message_router;
 static udp_api_t udp_api(&g_running, 1236);
 
 // Глобальные переменные для синхронизации с командой test_esp32
@@ -85,112 +90,151 @@ std::atomic<bool> g_test_response_received{ false };
 std::atomic<bool> g_status_response_received{ false };
 std::string g_esp32_status_response;
 
-// Обработчик принятых пакетов (старый формат для обратной совместимости)
+// Обработчик принятых пакетов (старый формат - больше не используется, оставлен для совместимости)
 void handle_packet(cmdcode_t cmd_code, const char* payload, u32 payload_len)
 {
-    std::cout << ANSI_INFO << "[app] Packet received (legacy format):" << ANSI_ENDL;
+    // Старый CMD протокол больше не используется
+    // Все сообщения должны приходить через новый протокол
+    std::cout << ANSI_WARN << "[app] Legacy CMD packet received (ignored):" << ANSI_ENDL;
     std::cout << "  CMD Code: 0x" << std::hex << cmd_code << std::dec << std::endl;
     std::cout << "  Payload length: " << payload_len << " bytes" << std::endl;
-    
-    // Пытаемся обработать как новый протокол
-    if (g_message_router && payload_len >= MSG_HEADER_LEN)
-    {
-        // Проверяем, является ли это новым форматом сообщения
-        const u8* buffer = reinterpret_cast<const u8*>(payload);
-        if (g_message_router->route_from_buffer(buffer, payload_len))
-        {
-            // Успешно обработано как новое сообщение
-            return;
-        }
-    }
-    
-    // Обработка старого формата для обратной совместимости
-    if (payload_len > 0 && payload != nullptr)
-    {
-        std::cout << "  Payload: ";
-        // Выводим данные (первые 100 байт для читаемости)
-        size_t print_len = (payload_len > 100) ? 100 : payload_len;
-        for (u32 i = 0; i < print_len; ++i)
-        {
-            if (payload[i] >= 32 && payload[i] < 127)
-            {
-                std::cout << payload[i];
-            }
-            else
-            {
-                std::cout << "\\x" << std::hex << (unsigned char)payload[i] << std::dec;
-            }
-        }
-        if (payload_len > 100)
-        {
-            std::cout << "...";
-        }
-        std::cout << std::endl;
-    }
-    
-    // Обработка специальных команд от ESP32
-    if (cmd_code == CMD_ESP && payload_len > 0 && payload != nullptr)
-    {
-        std::string payload_str(payload, payload_len);
-        
-        // Проверяем, является ли это ответом на тест
-        if (payload_str == "TEST_RESPONSE")
-        {
-            std::lock_guard<std::mutex> lock(g_response_mutex);
-            g_test_response_received.store(true);
-            g_response_cv.notify_one();
-            std::cout << ANSI_SUCC << "[app] Test response received from ESP32" << ANSI_ENDL << std::endl;
-            return;
-        }
-        
-        // Проверяем, является ли это ответом со статусом
-        if (payload_str.substr(0, 7) == "STATUS:")
-        {
-            std::lock_guard<std::mutex> lock(g_response_mutex);
-            g_esp32_status_response = payload_str;
-            g_status_response_received.store(true);
-            g_response_cv.notify_one();
-            std::cout << ANSI_SUCC << "[app] Status response received from ESP32" << ANSI_ENDL << std::endl;
-            return;
-        }
-    }
-    
-    // Здесь можно добавить обработку различных типов пакетов
-    switch (cmd_code)
-    {
-    case CMD_ESP:
-        std::cout << ANSI_SUCC << "  Type: ESP32 command" << ANSI_ENDL << std::endl;
-        break;
-    case CMD_STM:
-        std::cout << ANSI_SUCC << "  Type: STM32 command" << ANSI_ENDL << std::endl;
-        break;
-    case CMD_MIC:
-        std::cout << ANSI_SUCC << "  Type: Microphone data" << ANSI_ENDL << std::endl;
-        break;
-    case CMD_SPK:
-        std::cout << ANSI_SUCC << "  Type: Speaker data" << ANSI_ENDL << std::endl;
-        break;
-    case CMD_RESERVED:
-        std::cout << ANSI_SUCC << "  Type: Raw data (not CMD format)" << ANSI_ENDL << std::endl;
-        break;
-    default:
-        if (cmd_code != CMD_RESERVED)
-        {
-            std::cout << ANSI_SUCC << "  Type: Unknown command code" << ANSI_ENDL << std::endl;
-        }
-        break;
-    }
+    std::cout << "  Note: All communication should use the new message_protocol" << ANSI_ENDL << std::endl;
 }
 
 // Обработчик новых сообщений через message_router
 void handle_new_message(const msg_header_t& header, const u8* payload, u32 payload_len)
 {
-    std::cout << ANSI_INFO << "[app] New protocol message received:" << ANSI_ENDL;
+    std::cout << ANSI_INFO << "[app] [HANDLE] New protocol message received:" << ANSI_ENDL;
     std::cout << "  Type: " << static_cast<int>(header.msg_type) << std::endl;
-    std::cout << "  Source: " << static_cast<int>(header.source_id) << std::endl;
-    std::cout << "  Destination: " << static_cast<int>(header.destination_id) << std::endl;
+    std::cout << "  Source: " << static_cast<int>(header.source_id) 
+              << (header.source_id == MSG_SRC_ESP32 ? " (ESP32)" : 
+                  header.source_id == MSG_SRC_WIN ? " (WIN)" :
+                  header.source_id == MSG_SRC_STM32 ? " (STM32)" : " (EXTERNAL)") << std::endl;
+    std::cout << "  Destination: " << static_cast<int>(header.destination_id) 
+              << (header.destination_id == MSG_DST_EXTERNAL ? " (EXTERNAL)" : 
+                  header.destination_id == MSG_DST_WIN ? " (WIN)" :
+                  header.destination_id == MSG_DST_ESP32 ? " (ESP32)" : " (STM32)") << std::endl;
     std::cout << "  Priority: " << static_cast<int>(header.priority) << std::endl;
     std::cout << "  Payload length: " << header.payload_len << " bytes" << std::endl;
+    
+    // Обработка ответов от ESP32 и STM32 (включая изображения)
+    if ((header.source_id == MSG_SRC_ESP32 || header.source_id == MSG_SRC_STM32) && 
+        header.msg_type == MSG_TYPE_RESPONSE && payload && payload_len > 0)
+    {
+        const char* component_name = (header.source_id == MSG_SRC_ESP32) ? "ESP32" : "STM32";
+        msg_destination_t dst_key = (header.source_id == MSG_SRC_ESP32) ? MSG_DST_ESP32 : MSG_DST_STM32;
+        
+        std::cout << ANSI_INFO << "[app] [HANDLE] Processing response from " << component_name 
+                  << ", payload_len=" << payload_len << ANSI_ENDL;
+        
+        // Проверяем, является ли это текстовым ответом (TEST_RESPONSE или STATUS:)
+        if (payload_len < 1000)  // Текстовые ответы обычно маленькие
+        {
+            std::string payload_str(reinterpret_cast<const char*>(payload), payload_len);
+            
+            // Проверяем, является ли это ответом на тест
+            if (payload_str == "TEST_RESPONSE")
+            {
+                std::lock_guard<std::mutex> lock(g_response_mutex);
+                g_test_response_received.store(true);
+                g_response_cv.notify_one();
+                std::cout << ANSI_SUCC << "[app] Test response received from " << component_name << ANSI_ENDL << std::endl;
+                return;
+            }
+            
+            // Проверяем, является ли это ответом со статусом
+            if (payload_str.substr(0, 7) == "STATUS:")
+            {
+                std::lock_guard<std::mutex> lock(g_response_mutex);
+                g_esp32_status_response = payload_str;
+                g_status_response_received.store(true);
+                g_response_cv.notify_one();
+                std::cout << ANSI_SUCC << "[app] Status response received from " << component_name << ANSI_ENDL << std::endl;
+                return;
+            }
+        }
+        
+        // Если это не текстовый ответ, возможно это изображение - пересылаем в Python
+        std::cout << ANSI_INFO << "[app] [HANDLE] " << component_name 
+                  << " response appears to be binary data (possibly image), forwarding to Python client" << ANSI_ENDL;
+        
+        // Ищем test_id для этого ответа по source_id
+        std::string test_id;
+        std::string client_ip;
+        int client_port = 0;
+        
+        // Ищем test_id по destination (ESP32 -> MSG_DST_ESP32, STM32 -> MSG_DST_STM32)
+        {
+            std::lock_guard<std::mutex> lock(g_destination_to_test_id_mutex);
+            auto it = g_destination_to_test_id.find(dst_key);
+            if (it != g_destination_to_test_id.end())
+            {
+                test_id = it->second;
+                std::cout << ANSI_INFO << "[app] [HANDLE] Found test_id=" << test_id 
+                          << " for " << component_name << " response" << ANSI_ENDL;
+            }
+            else
+            {
+                std::cout << ANSI_WARN << "[app] [HANDLE] No test_id found for " << component_name << " response" << ANSI_ENDL;
+            }
+        }
+        
+        // Ищем адрес клиента по test_id
+        if (!test_id.empty())
+        {
+            std::lock_guard<std::mutex> lock(g_test_clients_mutex);
+            auto it = g_test_clients.find(test_id);
+            if (it != g_test_clients.end())
+            {
+                client_ip = it->second.first;
+                client_port = it->second.second;
+                std::cout << ANSI_INFO << "[app] [HANDLE] Found client " << client_ip << ":" << client_port 
+                          << " for test_id=" << test_id << ANSI_ENDL;
+            }
+            else
+            {
+                std::cout << ANSI_WARN << "[app] [HANDLE] No client found for test_id=" << test_id << ANSI_ENDL;
+            }
+        }
+        
+        // Конвертируем ответ в JSON и отправляем в Python
+        if (g_udp_api && g_message_router)
+        {
+            std::string json_str;
+            if (g_message_router->convert_binary_to_json(header, payload, payload_len, json_str, test_id))
+            {
+                if (!client_ip.empty() && client_port > 0)
+                {
+                    g_udp_api->send_json_to(client_ip, client_port, json_str);
+                    std::cout << ANSI_SUCC << "[app] [HANDLE] " << component_name 
+                              << " response forwarded to " << client_ip << ":" << client_port 
+                              << " with test_id=" << test_id << ANSI_ENDL;
+                }
+                else
+                {
+                    g_udp_api->send_json_to_all(json_str);
+                    std::cout << ANSI_SUCC << "[app] [HANDLE] " << component_name 
+                              << " response forwarded to all clients (fallback) with test_id=" << test_id << ANSI_ENDL;
+                }
+                
+                // Очищаем test_id после успешной отправки ответа
+                if (!test_id.empty())
+                {
+                    {
+                        std::lock_guard<std::mutex> lock(g_destination_to_test_id_mutex);
+                        g_destination_to_test_id.erase(dst_key);
+                        std::cout << ANSI_INFO << "[app] [HANDLE] Cleared test_id mapping for " << component_name << ANSI_ENDL;
+                    }
+                    // Не удаляем из g_test_clients, так как клиент может использовать тот же test_id для других запросов
+                }
+            }
+            else
+            {
+                std::cout << ANSI_ERR << "[app] [HANDLE] Failed to convert " << component_name << " response to JSON" << ANSI_ENDL;
+            }
+        }
+        return;
+    }
     
     // Обработка тестовых сообщений с изображениями для WIN
     if (header.destination_id == MSG_DST_WIN && header.msg_type == MSG_TYPE_DATA && payload && payload_len > 0)
@@ -219,7 +263,7 @@ void handle_new_message(const msg_header_t& header, const u8* payload, u32 paylo
             );
             
             // Отправляем ответ через UDP на адрес клиента
-            // Ищем test_id в последнем полученном сообщении (упрощенная версия)
+            // Ищем test_id по destination (WIN)
             if (g_udp_api && g_message_router)
             {
                 std::string json_str;
@@ -227,21 +271,37 @@ void handle_new_message(const msg_header_t& header, const u8* payload, u32 paylo
                 std::string client_ip;
                 int client_port = 0;
                 
+                // Ищем test_id по destination (WIN)
                 {
-                    std::lock_guard<std::mutex> lock(g_test_clients_mutex);
-                    // Берем последний зарегистрированный клиент (упрощенная версия)
-                    if (!g_test_clients.empty())
+                    std::lock_guard<std::mutex> lock(g_destination_to_test_id_mutex);
+                    auto it = g_destination_to_test_id.find(MSG_DST_WIN);
+                    if (it != g_destination_to_test_id.end())
                     {
-                        auto it = g_test_clients.rbegin(); // Последний элемент
-                        test_id = it->first;
-                        client_ip = it->second.first;
-                        client_port = it->second.second;
-                        std::cout << ANSI_INFO << "[app] Используем test_id=" << test_id 
-                                  << " для ответа клиенту " << client_ip << ":" << client_port << ANSI_ENDL << std::endl;
+                        test_id = it->second;
+                        std::cout << ANSI_INFO << "[app] Found test_id=" << test_id 
+                                  << " for WIN response" << ANSI_ENDL;
                     }
                     else
                     {
-                        std::cout << ANSI_WARN << "[app] Нет зарегистрированных клиентов для ответа" << ANSI_ENDL << std::endl;
+                        std::cout << ANSI_WARN << "[app] No test_id found for WIN response" << ANSI_ENDL;
+                    }
+                }
+                
+                // Ищем адрес клиента по test_id
+                if (!test_id.empty())
+                {
+                    std::lock_guard<std::mutex> lock(g_test_clients_mutex);
+                    auto it = g_test_clients.find(test_id);
+                    if (it != g_test_clients.end())
+                    {
+                        client_ip = it->second.first;
+                        client_port = it->second.second;
+                        std::cout << ANSI_INFO << "[app] Found client " << client_ip << ":" << client_port 
+                                  << " for test_id=" << test_id << ANSI_ENDL;
+                    }
+                    else
+                    {
+                        std::cout << ANSI_WARN << "[app] No client found for test_id=" << test_id << ANSI_ENDL;
                     }
                 }
                 
@@ -261,6 +321,14 @@ void handle_new_message(const msg_header_t& header, const u8* payload, u32 paylo
                         // Fallback: отправляем всем
                         g_udp_api->send_json_to_all(json_str);
                         std::cout << ANSI_SUCC << "[app] Response sent to all clients (fallback) с test_id=" << test_id << ANSI_ENDL;
+                    }
+                    
+                    // Очищаем test_id после успешной отправки ответа
+                    if (!test_id.empty())
+                    {
+                        std::lock_guard<std::mutex> lock(g_destination_to_test_id_mutex);
+                        g_destination_to_test_id.erase(MSG_DST_WIN);
+                        std::cout << ANSI_INFO << "[app] Cleared test_id mapping for WIN" << ANSI_ENDL;
                     }
                 }
                 else
@@ -366,6 +434,28 @@ void handle_udp_json(const std::string& json_str, const std::string& client_ip, 
         std::vector<u8> binary_data;
         if (g_message_router->convert_json_to_binary(json_str, binary_data))
         {
+            // Сохраняем соответствие между destination и test_id для последующего использования
+            if (!test_id.empty())
+            {
+                msg_header_t temp_header;
+                std::vector<u8> temp_payload;
+                std::string temp_test_id;
+                if (g_message_router->parse_json_message(json_str, temp_header, temp_payload, temp_test_id))
+                {
+                    msg_destination_t dst = (msg_destination_t)temp_header.destination_id;
+                    // Сохраняем для всех destination (WIN, ESP32, STM32)
+                    if (dst == MSG_DST_WIN || dst == MSG_DST_ESP32 || dst == MSG_DST_STM32)
+                    {
+                        std::lock_guard<std::mutex> lock(g_destination_to_test_id_mutex);
+                        g_destination_to_test_id[dst] = test_id;
+                        std::cout << ANSI_INFO << "[udp] Сохранено соответствие: destination=" 
+                                  << (dst == MSG_DST_WIN ? "WIN" : 
+                                      dst == MSG_DST_ESP32 ? "ESP32" : "STM32") 
+                                  << " -> test_id=" << test_id << ANSI_ENDL << std::endl;
+                    }
+                }
+            }
+            
             g_message_router->route_from_buffer(binary_data.data(), static_cast<u32>(binary_data.size()));
         }
         else

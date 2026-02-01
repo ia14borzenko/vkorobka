@@ -65,8 +65,8 @@ bool message_bridge_t::route_from_uart(const msg_header_t* header, const u8* pay
 
     msg_destination_t dst = (msg_destination_t)header->destination_id;
 
-    // Если сообщение для Windows или BROADCAST, отправляем через TCP
-    if (dst == MSG_DST_WIN || dst == MSG_DST_BROADCAST)
+    // Если сообщение для Windows, EXTERNAL (Python) или BROADCAST, отправляем через TCP
+    if (dst == MSG_DST_WIN || dst == MSG_DST_EXTERNAL || dst == MSG_DST_BROADCAST)
     {
         if (tcp_transport_ && tcp_transport_->is_connected())
         {

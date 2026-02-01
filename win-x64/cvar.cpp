@@ -1,4 +1,5 @@
 #include "cvar.hpp"
+#include "message_protocol.h"
 
 const std::string& cctx_t::get(size_t index) const
 {
@@ -87,81 +88,86 @@ void help_t::exec(cctx_t&)
     }
 }
 
-send_t::send_t() : cvar_t("send", "sending data (raw or packet format: send --cmd <code> <data>)") {}
+send_t::send_t() : cvar_t("send", "sending data via new protocol (send <destination> <data> or send --type <type> <destination> <data>)") {}
 
 void send_t::exec(cctx_t& ctx)
 {
-    if (!ctx.tcp)
+    if (!ctx.message_router)
     {
-        std::cout << ANSI_ERR << "TCP not initialized" << ANSI_ENDL << std::endl;
+        std::cout << ANSI_ERR << "Message router not initialized" << ANSI_ENDL << std::endl;
         return;
     }
 
-    if (!ctx.tcp->is_connected())
+    if (!ctx.tcp || !ctx.tcp->is_connected())
     {
         std::cout << ANSI_WARN << "TCP not connected" << ANSI_ENDL << std::endl;
         return;
     }
 
-    // Если указан флаг --cmd, отправляем пакет в формате CMD
-    if (ctx.has_flag("cmd"))
+    // Определяем тип сообщения и получателя
+    msg_type_t msg_type = MSG_TYPE_COMMAND;
+    msg_destination_t destination = MSG_DST_ESP32;
+    
+    if (ctx.has_flag("type"))
     {
-        std::string cmd_str = ctx.flag("cmd");
-        cmdcode_t cmd_code = CMD_RESERVED;
-        
-        // Парсим код команды (может быть hex: 0x41 или decimal: 65)
-        try
-        {
-            if (cmd_str.substr(0, 2) == "0x" || cmd_str.substr(0, 2) == "0X")
-            {
-                cmd_code = static_cast<cmdcode_t>(std::stoul(cmd_str, nullptr, 16));
-            }
-            else
-            {
-                cmd_code = static_cast<cmdcode_t>(std::stoul(cmd_str, nullptr, 10));
-            }
-        }
-        catch (...)
-        {
-            std::cout << ANSI_ERR << "Invalid command code format. Use hex (0x41) or decimal (65)" << ANSI_ENDL << std::endl;
-            return;
-        }
-
-        std::string data = ctx.get(0);
-        if (data.empty())
-        {
-            std::cout << ANSI_WARN << "No data to send. Usage: send --cmd <code> <data>" << ANSI_ENDL << std::endl;
-            return;
-        }
-
-        if (!ctx.tcp->send_packet(cmd_code, data))
-        {
-            std::cout << ANSI_ERR << "Packet send failed" << ANSI_ENDL << std::endl;
-        }
+        std::string type_str = ctx.flag("type");
+        if (type_str == "command" || type_str == "cmd")
+            msg_type = MSG_TYPE_COMMAND;
+        else if (type_str == "data")
+            msg_type = MSG_TYPE_DATA;
+        else if (type_str == "stream")
+            msg_type = MSG_TYPE_STREAM;
         else
         {
-            std::cout << ANSI_SUCC << "Packet sent: CMD=0x" << std::hex << cmd_code 
-                      << std::dec << ", Data=" << data << ANSI_ENDL << std::endl;
+            std::cout << ANSI_ERR << "Invalid message type. Use: command, data, stream" << ANSI_ENDL << std::endl;
+            return;
         }
+    }
+
+    // Определяем получателя
+    std::string dest_str = ctx.get(0);
+    if (dest_str == "esp32" || dest_str == "esp")
+        destination = MSG_DST_ESP32;
+    else if (dest_str == "stm32" || dest_str == "stm")
+        destination = MSG_DST_STM32;
+    else if (dest_str == "win" || dest_str == "windows")
+        destination = MSG_DST_WIN;
+    else if (!dest_str.empty())
+    {
+        std::cout << ANSI_ERR << "Invalid destination. Use: esp32, stm32, win" << ANSI_ENDL << std::endl;
+        return;
+    }
+
+    // Получаем данные для отправки
+    std::string data = ctx.has_flag("type") ? ctx.get(2) : ctx.get(1);
+    if (data.empty())
+    {
+        std::cout << ANSI_WARN << "No data to send. Usage: send <destination> <data> or send --type <type> <destination> <data>" << ANSI_ENDL << std::endl;
+        return;
+    }
+
+    // Создаем заголовок сообщения
+    msg_header_t header = msg_create_header(
+        msg_type,
+        MSG_SRC_WIN,
+        destination,
+        128,  // priority
+        0,    // stream_id
+        static_cast<u32>(data.size()),
+        0,    // sequence
+        MSG_ROUTE_NONE
+    );
+
+    // Отправляем через message_router
+    if (ctx.message_router->send_message(header, reinterpret_cast<const u8*>(data.c_str()), static_cast<u32>(data.size())))
+    {
+        std::cout << ANSI_SUCC << "Message sent: Type=" << (int)msg_type 
+                  << ", Destination=" << (int)destination 
+                  << ", Data=" << data << ANSI_ENDL << std::endl;
     }
     else
     {
-        // Отправка raw данных (без упаковки)
-        std::string data = ctx.get(0);
-        if (data.empty())
-        {
-            std::cout << ANSI_WARN << "No data to send. Usage: send <data> or send --cmd <code> <data>" << ANSI_ENDL << std::endl;
-            return;
-        }
-
-        if (!ctx.tcp->send(data))
-        {
-            std::cout << ANSI_ERR << "Send failed" << ANSI_ENDL << std::endl;
-        }
-        else
-        {
-            std::cout << ANSI_SUCC << "Data sent: " << data << ANSI_ENDL << std::endl;
-        }
+        std::cout << ANSI_ERR << "Message send failed" << ANSI_ENDL << std::endl;
     }
 }
 
@@ -248,13 +254,13 @@ test_esp32_t::test_esp32_t() : cvar_t("test_esp32", "test connection with ESP32 
 
 void test_esp32_t::exec(cctx_t& ctx)
 {
-    if (!ctx.tcp)
+    if (!ctx.message_router)
     {
-        std::cout << ANSI_ERR << "TCP not initialized" << ANSI_ENDL << std::endl;
+        std::cout << ANSI_ERR << "Message router not initialized" << ANSI_ENDL << std::endl;
         return;
     }
 
-    if (!ctx.tcp->is_connected())
+    if (!ctx.tcp || !ctx.tcp->is_connected())
     {
         std::cout << ANSI_WARN << "TCP not connected. Cannot test ESP32." << ANSI_ENDL << std::endl;
         return;
@@ -267,14 +273,26 @@ void test_esp32_t::exec(cctx_t& ctx)
     g_status_response_received.store(false);
     g_esp32_status_response.clear();
 
-    // Отправляем тестовый пакет
-    if (!ctx.tcp->send_packet(CMD_WIN, "TEST"))
+    // Отправляем тестовое сообщение через новый протокол
+    std::string test_data = "TEST";
+    msg_header_t test_header = msg_create_header(
+        MSG_TYPE_COMMAND,
+        MSG_SRC_WIN,
+        MSG_DST_ESP32,
+        128,  // priority
+        0,    // stream_id
+        static_cast<u32>(test_data.size()),
+        0,    // sequence
+        MSG_ROUTE_NONE
+    );
+
+    if (!ctx.message_router->send_message(test_header, reinterpret_cast<const u8*>(test_data.c_str()), static_cast<u32>(test_data.size())))
     {
-        std::cout << ANSI_ERR << "Failed to send test packet" << ANSI_ENDL << std::endl;
+        std::cout << ANSI_ERR << "Failed to send test message" << ANSI_ENDL << std::endl;
         return;
     }
 
-    std::cout << ANSI_INFO << "Test packet sent, waiting for response..." << ANSI_ENDL << std::endl;
+    std::cout << ANSI_INFO << "Test message sent, waiting for response..." << ANSI_ENDL << std::endl;
 
     // Ожидаем ответ с таймаутом (2 секунды)
     {
@@ -296,7 +314,19 @@ void test_esp32_t::exec(cctx_t& ctx)
     
     std::cout << ANSI_INFO << "Requesting status from ESP32..." << ANSI_ENDL << std::endl;
     
-    if (!ctx.tcp->send_packet(CMD_WIN, "STATUS"))
+    std::string status_data = "STATUS";
+    msg_header_t status_header = msg_create_header(
+        MSG_TYPE_COMMAND,
+        MSG_SRC_WIN,
+        MSG_DST_ESP32,
+        128,  // priority
+        0,    // stream_id
+        static_cast<u32>(status_data.size()),
+        0,    // sequence
+        MSG_ROUTE_NONE
+    );
+
+    if (!ctx.message_router->send_message(status_header, reinterpret_cast<const u8*>(status_data.c_str()), static_cast<u32>(status_data.size())))
     {
         std::cout << ANSI_ERR << "Failed to send status request" << ANSI_ENDL << std::endl;
         return;

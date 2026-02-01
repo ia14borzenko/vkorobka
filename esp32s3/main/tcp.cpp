@@ -126,48 +126,10 @@ bool tcp_t::send_packet(cmdcode_t cmd_code, const void* payload, u32 payload_len
         return false;
     }
     
-    // Выделяем буфер для пакета
-    std::vector<char> packet(CMD_HEADER_LEN + payload_len);
-    
-    // Упаковываем пакет
-    u32 packet_size = pack_packet(cmd_code, payload, payload_len, packet.data());
-    if (packet_size == 0)
-    {
-        ESP_LOGE(TAG, "Failed to pack packet");
-        return false;
-    }
-    
-    ESP_LOGI(TAG, "Sending packet:");
-    ESP_LOGI(TAG, "  CMD Code: 0x%04x", cmd_code);
-    ESP_LOGI(TAG, "  Payload length: %u bytes", payload_len);
-    ESP_LOGI(TAG, "  Total packet size: %u bytes", packet_size);
-    
-    // Отправляем все данные (может потребоваться несколько вызовов send)
-    const char* ptr = packet.data();
-    int remaining = static_cast<int>(packet_size);
-    int total_sent = 0;
-    
-    while (remaining > 0)
-    {
-        int sent = ::send(sock, ptr, remaining, 0);
-        if (sent < 0)
-        {
-            ESP_LOGE(TAG, "Send packet failed: errno %d", errno);
-            return false;
-        }
-        if (sent == 0)
-        {
-            ESP_LOGE(TAG, "Connection closed during send");
-            return false;
-        }
-        
-        total_sent += sent;
-        ptr += sent;
-        remaining -= sent;
-    }
-    
-    ESP_LOGI(TAG, "Packet sent successfully: %d bytes", total_sent);
-    return true;
+    // Старый CMD протокол больше не используется
+    // send_packet оставлен для совместимости, но не должен использоваться
+    ESP_LOGW(TAG, "send_packet called but old CMD protocol is no longer supported");
+    return false;
 }
 
 bool tcp_t::send_packet_str(cmdcode_t cmd_code, const char* str)
@@ -201,197 +163,91 @@ bool tcp_t::connection_alive(int sock) const
 
 void tcp_t::process_rx_buffer(void)
 {
-    u32 skip_count = 0;  // Счетчик пропущенных байт
-    const u32 MAX_REASONABLE_PAYLOAD = 65535;  // Максимальная разумная длина payload
-    const u32 MAX_SKIP_BEFORE_CLEAR = CMD_HEADER_LEN;  // После пропуска CMD_HEADER_LEN байт очищаем буфер
-    
-    while (rx_buffer.size() >= MSG_HEADER_LEN || rx_buffer.size() >= CMD_HEADER_LEN)
+    // Обрабатываем только новый протокол message_protocol
+    while (rx_buffer.size() >= MSG_HEADER_LEN)
     {
-        // СНАЧАЛА проверяем новый протокол message_protocol
-        if (rx_buffer.size() >= MSG_HEADER_LEN)
+        msg_header_t header;
+        const u8* payload = nullptr;
+        u32 payload_len = 0;
+        
+        // Пытаемся распарсить как новый протокол
+        int unpack_result = msg_unpack(reinterpret_cast<const u8*>(rx_buffer.data()), 
+                                      static_cast<u32>(rx_buffer.size()), 
+                                      &header, &payload, &payload_len);
+        
+        if (unpack_result)
         {
-            ESP_LOGI(TAG, "[CHECK] Checking for new protocol: buffer size=%zu, MSG_HEADER_LEN=%d", 
-                     rx_buffer.size(), MSG_HEADER_LEN);
+            // Проверяем, есть ли полный пакет
+            u32 expected_total = MSG_HEADER_LEN + payload_len;
             
-            // Показываем первые байты для отладки
-            ESP_LOGI(TAG, "[CHECK] First 12 bytes: %02x %02x %02x %02x %02x %02x %02x %02x %02x %02x %02x %02x",
-                     (u8)rx_buffer[0], (u8)rx_buffer[1], (u8)rx_buffer[2], (u8)rx_buffer[3],
-                     (u8)rx_buffer[4], (u8)rx_buffer[5], (u8)rx_buffer[6], (u8)rx_buffer[7],
-                     (u8)rx_buffer[8], (u8)rx_buffer[9], (u8)rx_buffer[10], (u8)rx_buffer[11]);
-            
-            msg_header_t header;
-            const u8* payload = nullptr;
-            u32 payload_len = 0;
-            
-            // Пытаемся распарсить как новый протокол
-            int unpack_result = msg_unpack(reinterpret_cast<const u8*>(rx_buffer.data()), 
-                                          static_cast<u32>(rx_buffer.size()), 
-                                          &header, &payload, &payload_len);
-            
-            ESP_LOGI(TAG, "[CHECK] msg_unpack result: %d", unpack_result);
-            
-            if (!unpack_result)
+            if (rx_buffer.size() >= expected_total)
             {
-                // Показываем, что мы прочитали из заголовка (даже если валидация не прошла)
-                ESP_LOGI(TAG, "[CHECK] Parsed header (before validation): type=0x%02x, src=0x%02x, dst=0x%02x, payload_len=%u",
-                         header.msg_type, header.source_id, header.destination_id, header.payload_len);
-            }
-            
-            if (unpack_result)
-            {
-                // Это новый протокол - передаем в message_bridge
-                skip_count = 0;
-                ESP_LOGI(TAG, "[NEW PROTOCOL] Message unpacked: Type=0x%02x, Src=0x%02x, Dst=0x%02x, Len=%u",
-                         header.msg_type, header.source_id, header.destination_id, payload_len);
-                
-                // Проверяем, есть ли полный пакет
-                u32 expected_total = MSG_HEADER_LEN + payload_len;
-                ESP_LOGI(TAG, "[NEW PROTOCOL] Expected total: %u, buffer size: %zu", 
-                         expected_total, rx_buffer.size());
-                
-                if (rx_buffer.size() >= expected_total)
+                // Передаем в message_bridge
+                if (g_message_bridge)
                 {
-                    // Передаем в message_bridge
-                    if (g_message_bridge)
-                    {
-                        ESP_LOGI(TAG, "[NEW PROTOCOL] Forwarding to message_bridge");
-                        g_message_bridge->process_buffer(
-                            reinterpret_cast<const u8*>(rx_buffer.data()), 
-                            static_cast<u32>(expected_total), 
-                            true  // from_tcp
-                        );
-                    }
-                    else
-                    {
-                        ESP_LOGW(TAG, "[NEW PROTOCOL] g_message_bridge is NULL!");
-                    }
-                    
-                    // Удаляем обработанный пакет из буфера
-                    rx_buffer.erase(rx_buffer.begin(), rx_buffer.begin() + expected_total);
-                    continue;  // Продолжаем обработку следующего пакета
+                    g_message_bridge->process_buffer(
+                        reinterpret_cast<const u8*>(rx_buffer.data()), 
+                        static_cast<u32>(expected_total), 
+                        true  // from_tcp
+                    );
                 }
-                else
-                {
-                    // Недостаточно данных для полного пакета, ждем еще
-                    ESP_LOGI(TAG, "[NEW PROTOCOL] Incomplete packet, waiting for more data (need %u more bytes)", 
-                            expected_total - static_cast<u32>(rx_buffer.size()));
-                    break;  // Выходим из цикла, чтобы дождаться больше данных
-                }
+                
+                // Удаляем обработанный пакет из буфера
+                rx_buffer.erase(rx_buffer.begin(), rx_buffer.begin() + expected_total);
+                continue;  // Продолжаем обработку следующего пакета
             }
             else
             {
-                ESP_LOGI(TAG, "[CHECK] New protocol check FAILED, trying old CMD format");
-            }
-        }
-        
-        // ТОЛЬКО ЕСЛИ это не новый протокол, проверяем старый CMD формат
-        if (rx_buffer.size() < CMD_HEADER_LEN)
-        {
-            break;  // Недостаточно данных даже для CMD заголовка
-        }
-        
-        // Проверяем, есть ли полный заголовок
-        const char* msg = rx_buffer.data();
-        u32 msg_len = static_cast<u32>(rx_buffer.size());
-        
-        // Читаем заголовок для проверки длины (читаем байты напрямую для правильного порядка байт)
-        // CMD Code: 2 байта (little-endian)
-        // Payload length: 4 байта (little-endian)
-        cmdcode_t cmd_code_raw = (cmdcode_t)(msg[0] | (msg[1] << 8));
-        u32 payload_len_raw = (u32)(msg[2] | (msg[3] << 8) | (msg[4] << 16) | (msg[5] << 24));
-        
-        // Проверка на разумность payload_len перед дальнейшей обработкой
-        if (payload_len_raw > MAX_REASONABLE_PAYLOAD)
-        {
-            // payload_len явно невалидный
-            skip_count++;
-            ESP_LOGW(TAG, "Invalid payload length: %u (too large), skipping byte (skip_count=%u)", 
-                     payload_len_raw, skip_count);
-            
-            // Если пропустили слишком много байт, очищаем буфер полностью
-            if (skip_count >= MAX_SKIP_BEFORE_CLEAR)
-            {
-                ESP_LOGW(TAG, "Too many invalid bytes, clearing RX buffer completely");
-                rx_buffer.clear();
-                skip_count = 0;
-                break;
-            }
-            
-            rx_buffer.erase(rx_buffer.begin());
-            continue;
-        }
-        
-        u32 expected_total = CMD_HEADER_LEN + payload_len_raw;
-        
-        ESP_LOGI(TAG, "Checking packet header:");
-        ESP_LOGI(TAG, "  CMD Code: 0x%04x", cmd_code_raw);
-        ESP_LOGI(TAG, "  Payload length (from header): %u bytes", payload_len_raw);
-        ESP_LOGI(TAG, "  Expected total packet size: %u bytes", expected_total);
-        ESP_LOGI(TAG, "  Current buffer size: %u bytes", msg_len);
-        
-
-        // Пытаемся распарсить пакет
-        const char* payload_begin = nullptr;
-        u32 payload_len = 0;
-        cmdcode_t cmd_code = is_pack(msg, expected_total, &payload_begin, &payload_len);
-        
-        if (cmd_code != CMD_RESERVED) 
-        {
-            // Сбрасываем счетчик при успешном парсинге
-            skip_count = 0;
-            
-            ESP_LOGI(TAG, "CMD format check PASSED");
-            ESP_LOGI(TAG, "  Valid CMD Code: 0x%04x", cmd_code);
-            ESP_LOGI(TAG, "  Payload length: %u bytes", payload_len);
-
-            // Проверяем, есть ли полный пакет
-            if (msg_len < expected_total)
-            {
                 // Недостаточно данных для полного пакета, ждем еще
-                ESP_LOGI(TAG, "Incomplete packet, waiting for more data (need %u more bytes)", 
-                        expected_total - msg_len);
                 break;  // Выходим из цикла, чтобы дождаться больше данных
             }
-            
-            // Полный пакет получен и распарсен
-            // Вызываем callback с данными пакета
-            if (rx_callback)
-            {
-                if (payload_len > 0 && payload_begin != nullptr)
-                {
-                    rx_callback(cmd_code, payload_begin, payload_len);
-                }
-                else
-                {
-                    // Пакет без данных
-                    rx_callback(cmd_code, nullptr, 0);
-                }
-            }
-            
-            // Удаляем весь обработанный пакет из буфера
-            rx_buffer.erase(rx_buffer.begin(), rx_buffer.begin() + expected_total);
-            continue;  // Продолжаем обработку следующего пакета
         }
         else
         {
-            // Неверный формат пакета, пропускаем один байт и пытаемся снова
-            skip_count++;
-            ESP_LOGW(TAG, "Invalid packet format - CMD format check FAILED");
-            ESP_LOGW(TAG, "  Header CMD Code: 0x%04x", cmd_code_raw);
-            ESP_LOGW(TAG, "  Header Payload Length: %u", payload_len_raw);
-            ESP_LOGW(TAG, "  Skipping byte and retrying... (skip_count=%u)", skip_count);
-            
-            // Если пропустили слишком много байт, очищаем буфер полностью
-            if (skip_count >= MAX_SKIP_BEFORE_CLEAR)
+            // Не удалось распарсить как новый протокол
+            // Проверяем, может быть данных недостаточно для полного пакета
+            if (rx_buffer.size() >= MSG_HEADER_LEN)
             {
-                ESP_LOGW(TAG, "Too many invalid bytes, clearing RX buffer completely");
-                rx_buffer.clear();
-                skip_count = 0;
-                break;
+                // Читаем заголовок вручную для проверки
+                u8 msg_type = rx_buffer[0];
+                u8 source_id = rx_buffer[1];
+                u8 destination_id = rx_buffer[2];
+                u32 payload_len_from_header = (u32)(rx_buffer[7] | (rx_buffer[8] << 8) | 
+                                                    (rx_buffer[9] << 16) | (rx_buffer[10] << 24));
+                u32 expected_total = MSG_HEADER_LEN + payload_len_from_header;
+                
+                // Проверяем валидность заголовка
+                bool header_looks_valid = (msg_type >= MSG_TYPE_COMMAND && msg_type <= MSG_TYPE_ERROR) &&
+                                         (source_id >= MSG_SRC_WIN && source_id <= MSG_SRC_EXTERNAL) &&
+                                         (destination_id >= MSG_DST_WIN && destination_id <= MSG_DST_BROADCAST) &&
+                                         (payload_len_from_header <= MSG_MAX_PAYLOAD_SIZE);
+                
+                if (header_looks_valid && rx_buffer.size() < expected_total)
+                {
+                    // Заголовок выглядит валидным, но данных недостаточно - ждем
+                    ESP_LOGI(TAG, "Valid header detected, waiting for more data (have %zu, need %u)", 
+                             rx_buffer.size(), expected_total);
+                    break;  // Выходим из цикла, чтобы дождаться больше данных
+                }
+                else if (header_looks_valid && rx_buffer.size() >= expected_total)
+                {
+                    // Заголовок валиден и данных достаточно, но unpack не прошел - странно
+                    // Попробуем еще раз распарсить
+                    continue;
+                }
             }
             
-            rx_buffer.erase(rx_buffer.begin());
-            continue;  // Продолжаем с пропущенным байтом
+            // Заголовок невалиден или данные повреждены - пропускаем один байт
+            ESP_LOGW(TAG, "Invalid header or corrupted data, skipping byte");
+            if (rx_buffer.size() > 0)
+            {
+                rx_buffer.erase(rx_buffer.begin());
+                continue;
+            }
+            else
+            {
+                break;
+            }
         }
     }
 }

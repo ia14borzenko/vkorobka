@@ -42,23 +42,127 @@ static void handle_new_message(const msg_header_t* header, const u8* payload, u3
     ESP_LOGI(TAG, "[RX] New protocol message: type=%d, src=%d, dst=%d, len=%u",
              header->msg_type, header->source_id, header->destination_id, header->payload_len);
     
+    // Обработка команд TEST и STATUS от win-x64
+    if (header->source_id == MSG_SRC_WIN && header->destination_id == MSG_DST_ESP32 && 
+        header->msg_type == MSG_TYPE_COMMAND && payload && payload_len > 0)
+    {
+        // Создаем временную строку для сравнения
+        char* str_buf = (char*)malloc(payload_len + 1);
+        if (str_buf) {
+            memcpy(str_buf, payload, payload_len);
+            str_buf[payload_len] = '\0';
+            
+            // Обработка команды TEST
+            if (strcmp(str_buf, "TEST") == 0) {
+                ESP_LOGI(TAG, "Received TEST command, sending response");
+                free(str_buf);
+                
+                // Отправляем ответ через новый протокол
+                const char* response = "TEST_RESPONSE";
+                msg_header_t response_header = msg_create_header(
+                    MSG_TYPE_RESPONSE,
+                    MSG_SRC_ESP32,
+                    MSG_DST_WIN,
+                    128,
+                    0,
+                    strlen(response),
+                    0,
+                    MSG_ROUTE_NONE
+                );
+                
+                if (g_message_bridge && g_message_bridge->send_message(response_header, 
+                                                                        reinterpret_cast<const u8*>(response), 
+                                                                        strlen(response)))
+                {
+                    ESP_LOGI(TAG, "Test response sent successfully via new protocol");
+                }
+                else
+                {
+                    ESP_LOGE(TAG, "Failed to send test response via new protocol");
+                }
+                return;
+            }
+            
+            // Обработка команды STATUS
+            if (strcmp(str_buf, "STATUS") == 0) {
+                ESP_LOGI(TAG, "Received STATUS command, sending status");
+                free(str_buf);
+                
+                // Формируем строку статуса: STATUS:WIFI=<state>:<connected>,TCP=<state>:<connected>
+                char status_buf[256];
+                const char* wifi_state_str = "UNKNOWN";
+                bool wifi_connected = false;
+                const char* tcp_state_str = "UNKNOWN";
+                bool tcp_connected = false;
+                
+                if (g_wifi) {
+                    wifi_connected = g_wifi->is_connected();
+                    // На ESP32 WiFi не имеет состояний как на win-x64, только подключен/не подключен
+                    wifi_state_str = wifi_connected ? "CONNECTED" : "DISCONNECTED";
+                }
+                
+                if (g_tcp) {
+                    tcp_state_t tcp_state = g_tcp->get_state();
+                    tcp_connected = g_tcp->is_connected();
+                    
+                    // На ESP32 tcp_state_t - это enum, а не enum class
+                    switch (tcp_state) {
+                        case TCP_STATE_INIT: tcp_state_str = "INIT"; break;
+                        case TCP_STATE_CONNECTING: tcp_state_str = "CONNECTING"; break;
+                        case TCP_STATE_CONNECTED: tcp_state_str = "CONNECTED"; break;
+                        case TCP_STATE_LOST: tcp_state_str = "LOST"; break;
+                        case TCP_STATE_RETRY: tcp_state_str = "RETRY"; break;
+                        default: tcp_state_str = "UNKNOWN"; break;
+                    }
+                }
+                
+                int status_len = snprintf(status_buf, sizeof(status_buf),
+                            "STATUS:WIFI=%s:%d,TCP=%s:%d",
+                            wifi_state_str, wifi_connected ? 1 : 0,
+                            tcp_state_str, tcp_connected ? 1 : 0);
+                
+                if (status_len > 0 && status_len < (int)sizeof(status_buf)) {
+                    // Отправляем ответ через новый протокол
+                    msg_header_t response_header = msg_create_header(
+                        MSG_TYPE_RESPONSE,
+                        MSG_SRC_ESP32,
+                        MSG_DST_WIN,
+                        128,
+                        0,
+                        status_len,
+                        0,
+                        MSG_ROUTE_NONE
+                    );
+                    
+                    if (g_message_bridge && g_message_bridge->send_message(response_header, 
+                                                                            reinterpret_cast<const u8*>(status_buf), 
+                                                                            status_len))
+                    {
+                        ESP_LOGI(TAG, "Status response sent successfully via new protocol");
+                    }
+                    else
+                    {
+                        ESP_LOGE(TAG, "Failed to send status response via new protocol");
+                    }
+                }
+                return;
+            }
+            
+            free(str_buf);
+        }
+    }
+    
     // Обработка тестовых сообщений с изображениями для ESP32
     if (header->destination_id == MSG_DST_ESP32 && header->msg_type == MSG_TYPE_DATA && payload && payload_len > 0)
     {
         ESP_LOGI(TAG, "[ESP32] Processing image test for ESP32 component");
         
-        // Упрощенная обработка: отзеркаливаем байты (переворачиваем порядок)
+        // Временное решение: возвращаем исходное изображение без изменений
+        // Простое переворачивание байтов портит JPG формат
         // В реальной реализации здесь должна быть декомпрессия JPG, отзеркаливание и рекомпрессия
-        std::vector<u8> mirrored_payload(payload_len);
+        std::vector<u8> mirrored_payload(payload, payload + payload_len);
         
-        // Простое отзеркаливание: переворачиваем порядок байтов
-        // Это не правильное отзеркаливание JPG, но для теста подойдет
-        for (u32 i = 0; i < payload_len; ++i)
-        {
-            mirrored_payload[i] = payload[payload_len - 1 - i];
-        }
-        
-        ESP_LOGI(TAG, "[ESP32] Image 'mirrored' (bytes reversed): %u bytes", payload_len);
+        ESP_LOGI(TAG, "[ESP32] Image returned (original, not mirrored): %u bytes", payload_len);
         
         // Формируем ответ
         msg_header_t response_header = msg_create_header(
@@ -91,11 +195,14 @@ static void handle_new_message(const msg_header_t* header, const u8* payload, u3
     }
 }
 
-// Обработчик принятых пакетов (старый формат для обратной совместимости)
+// Обработчик принятых пакетов (старый формат - больше не используется)
 static void handle_packet(cmdcode_t cmd_code, const char* payload, u32 payload_len) {
-    ESP_LOGI(TAG, "[RX] Packet received: CMD=0x%04x, len=%u", cmd_code, payload_len);
+    // Старый CMD протокол больше не используется
+    // Все сообщения должны приходить через новый протокол
+    ESP_LOGW(TAG, "[RX] Legacy CMD packet received (ignored): CMD=0x%04x, len=%u", cmd_code, payload_len);
+    ESP_LOGW(TAG, "Note: All communication should use the new message_protocol");
     
-    // Пытаемся обработать как новый протокол
+    // Пытаемся обработать как новый протокол (fallback)
     if (g_message_bridge && payload_len >= MSG_HEADER_LEN)
     {
         const u8* buffer = reinterpret_cast<const u8*>(payload);
@@ -106,8 +213,8 @@ static void handle_packet(cmdcode_t cmd_code, const char* payload, u32 payload_l
         }
     }
     
-    // Обработка команд от win-x64 (старый формат)
-    if (cmd_code == CMD_WIN && payload_len > 0 && payload != nullptr) {
+    // Старая обработка команд больше не используется
+    if (false && cmd_code == CMD_WIN && payload_len > 0 && payload != nullptr) {
         // Создаем временную строку для сравнения
         char* str_buf = (char*)malloc(payload_len + 1);
         if (str_buf) {
@@ -407,7 +514,7 @@ extern "C" void app_main(void) {
             g_message_bridge->route_from_uart(header, payload, payload_len);
         }
     });
-
+    
     // Инициализация TCP
     g_tcp = new tcp_t(SERVER_IP, SERVER_PORT, g_wifi);
     g_tcp->set_packet_callback(handle_packet);

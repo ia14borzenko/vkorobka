@@ -102,15 +102,10 @@ int main()
                         // Проверяем, является ли это тестовым изображением (по размеру, обычно > 1KB)
                         if (payload.size() > 1024)
                         {
-                            // Тестовое изображение - отзеркаливаем и отправляем обратно
-                            std::vector<u8> mirrored_payload(payload.size());
-                            
-                            // Упрощенная обработка: отзеркаливаем байты (переворачиваем порядок)
+                            // Тестовое изображение - возвращаем исходное без изменений
+                            // Временное решение: простое переворачивание байтов портит JPG формат
                             // В реальной реализации здесь должна быть декомпрессия JPG, отзеркаливание и рекомпрессия
-                            for (size_t i = 0; i < payload.size(); ++i)
-                            {
-                                mirrored_payload[i] = payload[payload.size() - 1 - i];
-                            }
+                            std::vector<u8> mirrored_payload(payload.begin(), payload.end());
                             
                             // Формируем ответ
                             msg_header_t response_header = msg_create_header(
@@ -155,5 +150,5 @@ int main()
         for (volatile int i = 0; i < 10000; ++i);
     }
     
-    return 0;
+	return 0;
 }

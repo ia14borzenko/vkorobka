@@ -165,8 +165,14 @@ bool message_router_t::route_message(const msg_header_t& header, const u8* paylo
         invoke_handlers(header, payload, payload_len);
     }
     
-    // Если сообщение для другого компонента, отправляем через транспорт
-    if (dst != MSG_DST_WIN && dst != MSG_DST_BROADCAST)
+    // Если сообщение для EXTERNAL (Python), тоже обрабатываем локально (чтобы переслать через UDP)
+    if (dst == MSG_DST_EXTERNAL)
+    {
+        invoke_handlers(header, payload, payload_len);
+    }
+    
+    // Если сообщение для другого компонента (ESP32/STM32), отправляем через транспорт
+    if (dst == MSG_DST_ESP32 || dst == MSG_DST_STM32)
     {
         return send_message(header, payload, payload_len);
     }
@@ -180,11 +186,11 @@ bool message_router_t::route_from_buffer(const u8* buffer, u32 buffer_len)
     {
         return false;
     }
-    
+
     msg_header_t header;
     const u8* payload = nullptr;
     u32 payload_len = 0;
-    
+
     if (!msg_unpack(buffer, buffer_len, &header, &payload, &payload_len))
     {
         return false;

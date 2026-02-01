@@ -16,7 +16,8 @@
 #include <chrono>
 #include "tcp.hpp"
 #include "wifi.hpp"
-#include "netpack.h"
+#include "message_router.hpp"
+#include "message_protocol.h"
 
 // Внешние переменные для синхронизации с командой test_esp32 (определены в main.cpp)
 extern std::mutex g_response_mutex;
@@ -59,8 +60,9 @@ struct cctx_t
 {
     std::vector<std::string> positional;
     std::map<std::string, std::string> flags;
-    tcp_t* tcp;  // Указатель на TCP объект для отправки данных
-    wifi_t* wifi;  // Указатель на WiFi объект для получения состояния
+    tcp_t* tcp = nullptr;  // Указатель на TCP объект для отправки данных
+    wifi_t* wifi = nullptr;  // Указатель на WiFi объект для получения состояния
+    message_router_t* message_router = nullptr;  // Указатель на message_router для нового протокола
 
     const std::string& get(size_t index) const;
     bool has_flag(const std::string& name) const;

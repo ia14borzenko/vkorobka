@@ -1,6 +1,9 @@
 #include "tcp.hpp"
-#include "message_protocol.h"
 #include "message_router.hpp"
+#include <iomanip>
+
+// Forward declaration - определен в main.cpp
+extern message_router_t* g_message_router;
 
 tcp_t::tcp_t(std::atomic<bool>* g_running_p)
     : g_running(g_running_p)
@@ -691,276 +694,86 @@ void tcp_t::run()
 
 void tcp_t::process_rx_buffer()
 {
-    u32 skip_count = 0;
-    const u32 MAX_REASONABLE_PAYLOAD = 65535;
-    const u32 MAX_SKIP_BEFORE_CLEAR = CMD_HEADER_LEN;
-    const u32 MAX_RAW_DATA_SIZE = 1024;  // Максимальный размер raw данных для обработки
-    
-    // Логируем первые байты буфера для отладки
-    if (!rx_buffer.empty())
+    // Обрабатываем только новый протокол message_protocol
+    while (rx_buffer.size() >= MSG_HEADER_LEN && g_message_router)
     {
-        std::cout << "[tcp] RX buffer contents (first " << (rx_buffer.size() > 16 ? 16 : rx_buffer.size()) << " bytes): ";
-        for (size_t i = 0; i < (rx_buffer.size() > 16 ? 16 : rx_buffer.size()); ++i)
-        {
-            std::cout << (unsigned char)rx_buffer[i] << " " << std::dec;
-        }
-        std::cout << "\n";
-    }
-    
-    // Если в буфере есть данные, но меньше CMD_HEADER_LEN, и буфер достаточно большой,
-    // возможно это raw данные, которые нужно обработать и очистить
-    if (rx_buffer.size() > 0 && rx_buffer.size() < CMD_HEADER_LEN && rx_buffer.size() <= MAX_RAW_DATA_SIZE)
-    {
-        // Пытаемся найти начало валидного CMD пакета, сканируя буфер
-        bool found_valid_packet = false;
-        size_t search_limit = (rx_buffer.size() > 100) ? 100 : rx_buffer.size();
-        
-        for (size_t offset = 0; offset <= search_limit && offset + CMD_HEADER_LEN <= rx_buffer.size(); ++offset)
-        {
-            const char* msg = rx_buffer.data() + offset;
-            cmdcode_t cmd_code_raw = static_cast<cmdcode_t>(msg[0] | (msg[1] << 8));
-            u32 payload_len_raw = static_cast<u32>(msg[2] | (msg[3] << 8) | (msg[4] << 16) | (msg[5] << 24));
-            
-            // Проверяем, является ли это валидным CMD кодом
-            if ((cmd_code_raw == CMD_WIN || cmd_code_raw == CMD_ESP || cmd_code_raw == CMD_STM ||
-                 cmd_code_raw == CMD_DPL || cmd_code_raw == CMD_MIC || cmd_code_raw == CMD_SPK) &&
-                payload_len_raw <= MAX_REASONABLE_PAYLOAD)
-            {
-                // Нашли потенциально валидный заголовок, но данных недостаточно
-                // Обрабатываем данные до этого смещения как raw
-                if (offset > 0)
-                {
-                    std::cout << "[tcp] Found potential CMD packet at offset " << offset 
-                              << ", treating " << offset << " bytes before as raw data\n";
-                    
-                    if (rx_callback)
-                    {
-                        rx_callback(CMD_RESERVED, rx_buffer.data(), static_cast<u32>(offset));
-                    }
-                    
-                    rx_buffer.erase(rx_buffer.begin(), rx_buffer.begin() + offset);
-                }
-                found_valid_packet = true;
-                break;
-            }
-        }
-        
-        // Если не нашли валидный пакет и буфер маленький, обрабатываем как raw
-        if (!found_valid_packet && rx_buffer.size() <= MAX_RAW_DATA_SIZE)
-        {
-            std::cout << "[tcp] Small buffer (" << rx_buffer.size() 
-                      << " bytes) doesn't contain valid CMD header, treating as raw data\n";
-            
-            if (rx_callback && !rx_buffer.empty())
-            {
-                rx_callback(CMD_RESERVED, rx_buffer.data(), static_cast<u32>(rx_buffer.size()));
-            }
-            
-            rx_buffer.clear();
-            return;
-        }
-    }
-    
-    // СНАЧАЛА проверяем новый протокол message_protocol
-    while (rx_buffer.size() >= MSG_HEADER_LEN)
-    {
+        // Пытаемся распарсить новый протокол
         msg_header_t header;
         const u8* payload = nullptr;
         u32 payload_len = 0;
         
-        // Пытаемся распарсить как новый протокол
-        if (msg_unpack(reinterpret_cast<const u8*>(rx_buffer.data()), 
-                      static_cast<u32>(rx_buffer.size()), 
-                      &header, &payload, &payload_len))
+        int unpack_result = msg_unpack(reinterpret_cast<const u8*>(rx_buffer.data()), 
+                                       static_cast<u32>(rx_buffer.size()), 
+                                       &header, &payload, &payload_len);
+        
+        if (unpack_result)
         {
-            // Это новый протокол
             u32 expected_total = MSG_HEADER_LEN + payload_len;
+            
             if (rx_buffer.size() >= expected_total)
             {
-                // Передаем в message_router напрямую
-                // g_message_router объявлен в main.cpp
-                extern message_router_t* g_message_router;
-                if (g_message_router)
+                // Передаем в message_router для обработки
+                if (g_message_router->route_from_buffer(reinterpret_cast<const u8*>(rx_buffer.data()), 
+                                                         expected_total))
                 {
-                    g_message_router->route_from_buffer(
-                        reinterpret_cast<const u8*>(rx_buffer.data()), 
-                        static_cast<u32>(expected_total)
-                    );
-                }
-                
-                // Удаляем обработанный пакет из буфера
-                rx_buffer.erase(rx_buffer.begin(), rx_buffer.begin() + expected_total);
-                skip_count = 0;  // Сбрасываем счетчик пропусков
-                continue;  // Продолжаем обработку следующего пакета
-            }
-            else
-            {
-                // Недостаточно данных для полного пакета, ждем еще
-                break;  // Выходим из цикла, чтобы дождаться больше данных
-            }
-        }
-        else
-        {
-            // Это не новый протокол, выходим из цикла проверки нового протокола
-            break;
-        }
-    }
-    
-    // ТОЛЬКО ЕСЛИ это не новый протокол, проверяем старый CMD формат
-    while (rx_buffer.size() >= CMD_HEADER_LEN)
-    {
-        // Проверяем, есть ли полный заголовок
-        const char* msg = rx_buffer.data();
-        u32 msg_len = static_cast<u32>(rx_buffer.size());
-        
-        // Сначала читаем заголовок для проверки длины (читаем байты напрямую для правильного порядка байт)
-        // CMD Code: 2 байта (little-endian)
-        // Payload length: 4 байта (little-endian)
-        cmdcode_t cmd_code_raw = static_cast<cmdcode_t>(msg[0] | (msg[1] << 8));
-        u32 payload_len_raw = static_cast<u32>(msg[2] | (msg[3] << 8) | (msg[4] << 16) | (msg[5] << 24));
-        
-        // Проверка на разумность payload_len перед дальнейшей обработкой
-        if (payload_len_raw > MAX_REASONABLE_PAYLOAD)
-        {
-            skip_count++;
-            std::cerr << "[tcp] Invalid payload length: " << payload_len_raw 
-                     << " (too large), skipping byte (skip_count=" << skip_count << ")\n";
-            
-            if (skip_count >= MAX_SKIP_BEFORE_CLEAR)
-            {
-                std::cerr << "[tcp] Too many invalid bytes, treating as raw data and clearing\n";
-                
-                // Обрабатываем как raw данные перед очисткой
-                if (rx_callback && !rx_buffer.empty())
-                {
-                    rx_callback(CMD_RESERVED, rx_buffer.data(), static_cast<u32>(rx_buffer.size()));
-                }
-                
-                rx_buffer.clear();
-                skip_count = 0;
-                break;
-            }
-            
-            rx_buffer.erase(rx_buffer.begin());
-            continue;
-        }
-        
-        u32 expected_total = CMD_HEADER_LEN + payload_len_raw;
-        
-        std::cout << "[tcp] Checking packet header:\n";
-        std::cout << "  CMD Code: 0x" << std::hex << cmd_code_raw << std::dec << "\n";
-        std::cout << "  Payload length (from header): " << payload_len_raw << " bytes\n";
-        std::cout << "  Expected total packet size: " << expected_total << " bytes\n";
-        std::cout << "  Current buffer size: " << msg_len << " bytes\n";
-        
-        // Проверяем, есть ли полный пакет
-        if (msg_len < expected_total)
-        {
-            // Недостаточно данных для полного пакета, ждем еще
-            std::cout << "[tcp] Incomplete packet, waiting for more data (need " 
-                     << (expected_total - msg_len) << " more bytes)\n";
-            break;
-        }
-        
-        // Пытаемся распарсить пакет
-        const char* payload_begin = nullptr;
-        u32 payload_len = 0;
-        cmdcode_t cmd_code = is_pack(msg, expected_total, &payload_begin, &payload_len);
-        
-        if (cmd_code != CMD_RESERVED)
-        {
-            skip_count = 0;
-            
-            std::cout << "[tcp] CMD format check PASSED\n";
-            std::cout << "  Valid CMD Code: 0x" << std::hex << cmd_code << std::dec << "\n";
-            std::cout << "  Payload length: " << payload_len << " bytes\n";
-            
-            // Полный пакет получен и распарсен
-            // Вызываем callback с данными пакета
-            if (rx_callback)
-            {
-                if (payload_len > 0 && payload_begin != nullptr)
-                {
-                    rx_callback(cmd_code, payload_begin, payload_len);
+                    // Успешно обработано, удаляем из буфера
+                    rx_buffer.erase(rx_buffer.begin(), rx_buffer.begin() + expected_total);
+                    // Продолжаем обработку следующего сообщения
+                    continue;
                 }
                 else
                 {
-                    // Пакет без данных
-                    rx_callback(cmd_code, nullptr, 0);
-                }
-            }
-            else
-            {
-                std::cerr << "[tcp] WARNING: rx_callback is null!\n";
-            }
-            
-            // Удаляем обработанный пакет из буфера
-            rx_buffer.erase(rx_buffer.begin(), rx_buffer.begin() + expected_total);
-            continue;
-        }
-        else
-        {
-            skip_count++;
-            std::cerr << "[tcp] Invalid packet format - CMD format check FAILED\n";
-            std::cerr << "  Header CMD Code: 0x" << std::hex << cmd_code_raw << std::dec << "\n";
-            std::cerr << "  Header Payload Length: " << payload_len_raw << "\n";
-            
-            // Если накопилось много пропусков, пытаемся найти начало валидного пакета
-            if (skip_count >= MAX_SKIP_BEFORE_CLEAR)
-            {
-                // Ищем начало валидного CMD пакета в буфере
-                bool found_valid = false;
-                size_t search_start = 1;
-                size_t search_limit = (rx_buffer.size() > 200) ? 200 : rx_buffer.size();
-                
-                for (size_t offset = search_start; offset + CMD_HEADER_LEN <= rx_buffer.size() && offset < search_limit; ++offset)
-                {
-                    const char* test_msg = rx_buffer.data() + offset;
-                    cmdcode_t test_cmd = static_cast<cmdcode_t>(test_msg[0] | (test_msg[1] << 8));
-                    u32 test_len = static_cast<u32>(test_msg[2] | (test_msg[3] << 8) | (test_msg[4] << 16) | (test_msg[5] << 24));
-                    
-                    if ((test_cmd == CMD_WIN || test_cmd == CMD_ESP || test_cmd == CMD_STM ||
-                         test_cmd == CMD_DPL || test_cmd == CMD_MIC || test_cmd == CMD_SPK) &&
-                        test_len <= MAX_REASONABLE_PAYLOAD)
-                    {
-                        // Нашли потенциально валидный заголовок
-                        std::cout << "[tcp] Found potential valid CMD packet at offset " << offset 
-                                  << ", treating " << offset << " bytes before as raw data\n";
-                        
-                        // Обрабатываем данные до этого смещения как raw
-                        if (rx_callback && offset > 0)
-                        {
-                            rx_callback(CMD_RESERVED, rx_buffer.data(), static_cast<u32>(offset));
-                        }
-                        
-                        rx_buffer.erase(rx_buffer.begin(), rx_buffer.begin() + offset);
-                        skip_count = 0;
-                        found_valid = true;
-                        break;
-                    }
-                }
-                
-                if (!found_valid)
-                {
-                    // Не нашли валидный пакет, обрабатываем весь буфер как raw
-                    std::cout << "[tcp] Data doesn't match CMD format, treating entire buffer as raw data\n";
-                    std::cout << "[tcp] Raw data size: " << rx_buffer.size() << " bytes\n";
-                    
-                    if (rx_callback && !rx_buffer.empty())
-                    {
-                        rx_callback(CMD_RESERVED, rx_buffer.data(), static_cast<u32>(rx_buffer.size()));
-                    }
-                    
-                    rx_buffer.clear();
-                    skip_count = 0;
+                    std::cerr << "[tcp] ERROR: message_router->route_from_buffer returned false\n";
+                    // Не удалось обработать, выходим
                     break;
                 }
             }
             else
             {
-                std::cerr << "  Skipping byte and retrying... (skip_count=" << skip_count << ")\n";
-                rx_buffer.erase(rx_buffer.begin());
-                continue;
+                // Недостаточно данных для полного пакета, ждем еще
+                return;
+            }
+        }
+        else
+        {
+            // Не удалось распарсить как новый протокол
+            // Проверяем, валиден ли заголовок (чтобы понять, недостаточно данных или невалидный заголовок)
+            if (rx_buffer.size() >= MSG_HEADER_LEN)
+            {
+                // Читаем заголовок вручную для проверки
+                u32 payload_len_from_header = (u32)(rx_buffer[7] | (rx_buffer[8] << 8) | 
+                                                    (rx_buffer[9] << 16) | (rx_buffer[10] << 24));
+                u32 expected_total = MSG_HEADER_LEN + payload_len_from_header;
+                
+                // Проверяем валидность заголовка
+                bool header_looks_valid = (header.msg_type >= MSG_TYPE_COMMAND && header.msg_type <= MSG_TYPE_ERROR) &&
+                                         (header.source_id >= MSG_SRC_WIN && header.source_id <= MSG_SRC_EXTERNAL) &&
+                                         (header.destination_id >= MSG_DST_WIN && header.destination_id <= MSG_DST_BROADCAST) &&
+                                         (payload_len_from_header <= MSG_MAX_PAYLOAD_SIZE);
+                
+                if (header_looks_valid && rx_buffer.size() < expected_total)
+                {
+                    // Заголовок выглядит валидным, но данных недостаточно - ждем
+                    return;
+                }
+                else if (header_looks_valid && rx_buffer.size() >= expected_total)
+                {
+                    // Заголовок валиден и данных достаточно, но unpack не прошел - странно
+                    // Попробуем еще раз распарсить
+                    continue;
+                }
+                else
+                {
+                    // Заголовок невалиден или данные повреждены - пропускаем один байт
+                    std::cerr << "[tcp] Invalid header or corrupted data, skipping byte\n";
+                    rx_buffer.erase(rx_buffer.begin());
+                    continue;
+                }
+            }
+            else
+            {
+                // Недостаточно данных даже для заголовка, ждем
+                return;
             }
         }
     }
