@@ -11,6 +11,9 @@
 #include "netpack.h"
 #include "wifi.hpp"
 #include "tcp.hpp"
+#include "message_bridge.hpp"
+#include "uart_bridge.hpp"
+#include "message_protocol.h"
 
 static const char* TAG = "vkorobka";
 
@@ -25,12 +28,85 @@ static const char* TAG = "vkorobka";
 // Глобальные объекты
 static wifi_t* g_wifi = nullptr;
 static tcp_t* g_tcp = nullptr;
+message_bridge_t* g_message_bridge = nullptr;  // Убрано static для доступа из tcp.cpp
+static uart_bridge_t* g_uart_bridge = nullptr;
 
-// Обработчик принятых пакетов
+// Обработчик новых сообщений через message_bridge
+static void handle_new_message(const msg_header_t* header, const u8* payload, u32 payload_len)
+{
+    if (header == nullptr)
+    {
+        return;
+    }
+    
+    ESP_LOGI(TAG, "[RX] New protocol message: type=%d, src=%d, dst=%d, len=%u",
+             header->msg_type, header->source_id, header->destination_id, header->payload_len);
+    
+    // Обработка тестовых сообщений с изображениями для ESP32
+    if (header->destination_id == MSG_DST_ESP32 && header->msg_type == MSG_TYPE_DATA && payload && payload_len > 0)
+    {
+        ESP_LOGI(TAG, "[ESP32] Processing image test for ESP32 component");
+        
+        // Упрощенная обработка: отзеркаливаем байты (переворачиваем порядок)
+        // В реальной реализации здесь должна быть декомпрессия JPG, отзеркаливание и рекомпрессия
+        std::vector<u8> mirrored_payload(payload_len);
+        
+        // Простое отзеркаливание: переворачиваем порядок байтов
+        // Это не правильное отзеркаливание JPG, но для теста подойдет
+        for (u32 i = 0; i < payload_len; ++i)
+        {
+            mirrored_payload[i] = payload[payload_len - 1 - i];
+        }
+        
+        ESP_LOGI(TAG, "[ESP32] Image 'mirrored' (bytes reversed): %u bytes", payload_len);
+        
+        // Формируем ответ
+        msg_header_t response_header = msg_create_header(
+            MSG_TYPE_RESPONSE,
+            MSG_SRC_ESP32,
+            MSG_DST_EXTERNAL,
+            128,
+            0,
+            payload_len,
+            0,
+            MSG_ROUTE_NONE
+        );
+        
+        // Отправляем ответ обратно через TCP используя message_bridge
+        if (g_message_bridge)
+        {
+            if (g_message_bridge->send_message(response_header, mirrored_payload.data(), payload_len))
+            {
+                ESP_LOGI(TAG, "[ESP32] Response sent to Windows via message_bridge");
+            }
+            else
+            {
+                ESP_LOGE(TAG, "[ESP32] Failed to send response via message_bridge");
+            }
+        }
+        else
+        {
+            ESP_LOGW(TAG, "[ESP32] message_bridge not available, cannot send response");
+        }
+    }
+}
+
+// Обработчик принятых пакетов (старый формат для обратной совместимости)
 static void handle_packet(cmdcode_t cmd_code, const char* payload, u32 payload_len) {
     ESP_LOGI(TAG, "[RX] Packet received: CMD=0x%04x, len=%u", cmd_code, payload_len);
     
-    // Обработка команд от win-x64
+    // Пытаемся обработать как новый протокол
+    if (g_message_bridge && payload_len >= MSG_HEADER_LEN)
+    {
+        const u8* buffer = reinterpret_cast<const u8*>(payload);
+        if (g_message_bridge->process_buffer(buffer, payload_len, true))
+        {
+            // Успешно обработано как новое сообщение
+            return;
+        }
+    }
+    
+    // Обработка команд от win-x64 (старый формат)
     if (cmd_code == CMD_WIN && payload_len > 0 && payload != nullptr) {
         // Создаем временную строку для сравнения
         char* str_buf = (char*)malloc(payload_len + 1);
@@ -303,9 +379,41 @@ extern "C" void app_main(void) {
     g_wifi->wait_for_connection();
     ESP_LOGI(TAG, "Wi-Fi connected");
     
+    // Инициализация UART bridge
+    g_uart_bridge = new uart_bridge_t(UART_NUM_2, 115200);
+    if (!g_uart_bridge->init(17, 16))  // TX=17, RX=16 (настройте под вашу плату)
+    {
+        ESP_LOGE(TAG, "UART bridge initialization failed");
+        return;
+    }
+    if (!g_uart_bridge->start())
+    {
+        ESP_LOGE(TAG, "UART bridge start failed");
+        return;
+    }
+    ESP_LOGI(TAG, "UART bridge started");
+
+    // Инициализация message bridge
+    g_message_bridge = new message_bridge_t();
+    g_message_bridge->init(nullptr, g_uart_bridge);  // TCP будет установлен позже
+    g_message_bridge->register_handler(MSG_TYPE_COMMAND, handle_new_message);
+    g_message_bridge->register_handler(MSG_TYPE_DATA, handle_new_message);
+    g_message_bridge->register_handler(MSG_TYPE_STREAM, handle_new_message);
+    
+    // Устанавливаем callback для UART
+    g_uart_bridge->set_message_callback([](const msg_header_t* header, const u8* payload, u32 payload_len) {
+        if (g_message_bridge)
+        {
+            g_message_bridge->route_from_uart(header, payload, payload_len);
+        }
+    });
+
     // Инициализация TCP
     g_tcp = new tcp_t(SERVER_IP, SERVER_PORT, g_wifi);
     g_tcp->set_packet_callback(handle_packet);
+    
+    // Устанавливаем TCP в message_bridge
+    g_message_bridge->init(g_tcp, g_uart_bridge);
     
     if (!g_tcp->start()) {
         ESP_LOGE(TAG, "TCP client start failed");

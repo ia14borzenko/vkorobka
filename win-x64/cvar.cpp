@@ -25,7 +25,7 @@ const std::string& cctx_t::flag(const std::string& name) const
 cvar_t::cvar_t(const std::string& n, const std::string& d)
     : name(n), description(d)
 {
-    registry()[name] = this;
+    cvar_t::registry()[name] = this;
 }
 
 std::map<std::string, cvar_t*>& cvar_t::registry()
@@ -80,7 +80,7 @@ help_t::help_t() : cvar_t("help", "show command list") {}
 void help_t::exec(cctx_t&)
 {
     std::cout << "Command list:\n";
-    for (const auto& kv : registry())
+    for (const auto& kv : cvar_t::registry())
     {
         std::cout << "  " << kv.first
             << " — " << kv.second->description << "\n";

@@ -1,4 +1,6 @@
 #include "tcp.hpp"
+#include "message_protocol.h"
+#include "message_router.hpp"
 
 tcp_t::tcp_t(std::atomic<bool>* g_running_p)
     : g_running(g_running_p)
@@ -181,6 +183,16 @@ bool tcp_t::send_packet(cmdcode_t cmd_code, const void* payload, u32 payload_len
 bool tcp_t::send_packet(cmdcode_t cmd_code, const std::string& payload)
 {
     return send_packet(cmd_code, payload.c_str(), static_cast<u32>(payload.size()));
+}
+
+bool tcp_t::send_message(const u8* buffer, u32 buffer_len)
+{
+    if (buffer == nullptr || buffer_len == 0)
+    {
+        return false;
+    }
+    
+    return send(reinterpret_cast<const char*>(buffer), static_cast<int>(buffer_len));
 }
 
 int tcp_t::tcp_init()
@@ -749,6 +761,52 @@ void tcp_t::process_rx_buffer()
         }
     }
     
+    // СНАЧАЛА проверяем новый протокол message_protocol
+    while (rx_buffer.size() >= MSG_HEADER_LEN)
+    {
+        msg_header_t header;
+        const u8* payload = nullptr;
+        u32 payload_len = 0;
+        
+        // Пытаемся распарсить как новый протокол
+        if (msg_unpack(reinterpret_cast<const u8*>(rx_buffer.data()), 
+                      static_cast<u32>(rx_buffer.size()), 
+                      &header, &payload, &payload_len))
+        {
+            // Это новый протокол
+            u32 expected_total = MSG_HEADER_LEN + payload_len;
+            if (rx_buffer.size() >= expected_total)
+            {
+                // Передаем в message_router напрямую
+                // g_message_router объявлен в main.cpp
+                extern message_router_t* g_message_router;
+                if (g_message_router)
+                {
+                    g_message_router->route_from_buffer(
+                        reinterpret_cast<const u8*>(rx_buffer.data()), 
+                        static_cast<u32>(expected_total)
+                    );
+                }
+                
+                // Удаляем обработанный пакет из буфера
+                rx_buffer.erase(rx_buffer.begin(), rx_buffer.begin() + expected_total);
+                skip_count = 0;  // Сбрасываем счетчик пропусков
+                continue;  // Продолжаем обработку следующего пакета
+            }
+            else
+            {
+                // Недостаточно данных для полного пакета, ждем еще
+                break;  // Выходим из цикла, чтобы дождаться больше данных
+            }
+        }
+        else
+        {
+            // Это не новый протокол, выходим из цикла проверки нового протокола
+            break;
+        }
+    }
+    
+    // ТОЛЬКО ЕСЛИ это не новый протокол, проверяем старый CMD формат
     while (rx_buffer.size() >= CMD_HEADER_LEN)
     {
         // Проверяем, есть ли полный заголовок

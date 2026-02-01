@@ -17,6 +17,7 @@
 // Include netpack for packet format
 #include "netpack.h"
 #include "my_types.h"
+#include "message_protocol.h"
 
 #pragma comment(lib, "Ws2_32.lib")
 
@@ -63,6 +64,9 @@ public:
     bool send_packet(cmdcode_t cmd_code, const void* payload, u32 payload_len);
     // Удобная перегрузка для отправки строки
     bool send_packet(cmdcode_t cmd_code, const std::string& payload);
+    
+    // Отправка бинарного сообщения нового протокола
+    bool send_message(const u8* buffer, u32 buffer_len);
 
 private:
     std::atomic<bool>* g_running;

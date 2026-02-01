@@ -4,8 +4,13 @@
 #include "lwip/sockets.h"
 #include "lwip/netdb.h"
 #include <string.h>
+#include "message_protocol.h"
+#include "message_bridge.hpp"
 
 static const char* TAG = "tcp";
+
+// Forward declaration - определен в main.cpp
+extern message_bridge_t* g_message_bridge;
 
 tcp_t::tcp_t(const char* server_ip, int server_port, wifi_t* wifi)
     : server_ip(server_ip)
@@ -200,8 +205,91 @@ void tcp_t::process_rx_buffer(void)
     const u32 MAX_REASONABLE_PAYLOAD = 65535;  // Максимальная разумная длина payload
     const u32 MAX_SKIP_BEFORE_CLEAR = CMD_HEADER_LEN;  // После пропуска CMD_HEADER_LEN байт очищаем буфер
     
-    while (rx_buffer.size() >= CMD_HEADER_LEN)
+    while (rx_buffer.size() >= MSG_HEADER_LEN || rx_buffer.size() >= CMD_HEADER_LEN)
     {
+        // СНАЧАЛА проверяем новый протокол message_protocol
+        if (rx_buffer.size() >= MSG_HEADER_LEN)
+        {
+            ESP_LOGI(TAG, "[CHECK] Checking for new protocol: buffer size=%zu, MSG_HEADER_LEN=%d", 
+                     rx_buffer.size(), MSG_HEADER_LEN);
+            
+            // Показываем первые байты для отладки
+            ESP_LOGI(TAG, "[CHECK] First 12 bytes: %02x %02x %02x %02x %02x %02x %02x %02x %02x %02x %02x %02x",
+                     (u8)rx_buffer[0], (u8)rx_buffer[1], (u8)rx_buffer[2], (u8)rx_buffer[3],
+                     (u8)rx_buffer[4], (u8)rx_buffer[5], (u8)rx_buffer[6], (u8)rx_buffer[7],
+                     (u8)rx_buffer[8], (u8)rx_buffer[9], (u8)rx_buffer[10], (u8)rx_buffer[11]);
+            
+            msg_header_t header;
+            const u8* payload = nullptr;
+            u32 payload_len = 0;
+            
+            // Пытаемся распарсить как новый протокол
+            int unpack_result = msg_unpack(reinterpret_cast<const u8*>(rx_buffer.data()), 
+                                          static_cast<u32>(rx_buffer.size()), 
+                                          &header, &payload, &payload_len);
+            
+            ESP_LOGI(TAG, "[CHECK] msg_unpack result: %d", unpack_result);
+            
+            if (!unpack_result)
+            {
+                // Показываем, что мы прочитали из заголовка (даже если валидация не прошла)
+                ESP_LOGI(TAG, "[CHECK] Parsed header (before validation): type=0x%02x, src=0x%02x, dst=0x%02x, payload_len=%u",
+                         header.msg_type, header.source_id, header.destination_id, header.payload_len);
+            }
+            
+            if (unpack_result)
+            {
+                // Это новый протокол - передаем в message_bridge
+                skip_count = 0;
+                ESP_LOGI(TAG, "[NEW PROTOCOL] Message unpacked: Type=0x%02x, Src=0x%02x, Dst=0x%02x, Len=%u",
+                         header.msg_type, header.source_id, header.destination_id, payload_len);
+                
+                // Проверяем, есть ли полный пакет
+                u32 expected_total = MSG_HEADER_LEN + payload_len;
+                ESP_LOGI(TAG, "[NEW PROTOCOL] Expected total: %u, buffer size: %zu", 
+                         expected_total, rx_buffer.size());
+                
+                if (rx_buffer.size() >= expected_total)
+                {
+                    // Передаем в message_bridge
+                    if (g_message_bridge)
+                    {
+                        ESP_LOGI(TAG, "[NEW PROTOCOL] Forwarding to message_bridge");
+                        g_message_bridge->process_buffer(
+                            reinterpret_cast<const u8*>(rx_buffer.data()), 
+                            static_cast<u32>(expected_total), 
+                            true  // from_tcp
+                        );
+                    }
+                    else
+                    {
+                        ESP_LOGW(TAG, "[NEW PROTOCOL] g_message_bridge is NULL!");
+                    }
+                    
+                    // Удаляем обработанный пакет из буфера
+                    rx_buffer.erase(rx_buffer.begin(), rx_buffer.begin() + expected_total);
+                    continue;  // Продолжаем обработку следующего пакета
+                }
+                else
+                {
+                    // Недостаточно данных для полного пакета, ждем еще
+                    ESP_LOGI(TAG, "[NEW PROTOCOL] Incomplete packet, waiting for more data (need %u more bytes)", 
+                            expected_total - static_cast<u32>(rx_buffer.size()));
+                    break;  // Выходим из цикла, чтобы дождаться больше данных
+                }
+            }
+            else
+            {
+                ESP_LOGI(TAG, "[CHECK] New protocol check FAILED, trying old CMD format");
+            }
+        }
+        
+        // ТОЛЬКО ЕСЛИ это не новый протокол, проверяем старый CMD формат
+        if (rx_buffer.size() < CMD_HEADER_LEN)
+        {
+            break;  // Недостаточно данных даже для CMD заголовка
+        }
+        
         // Проверяем, есть ли полный заголовок
         const char* msg = rx_buffer.data();
         u32 msg_len = static_cast<u32>(rx_buffer.size());
