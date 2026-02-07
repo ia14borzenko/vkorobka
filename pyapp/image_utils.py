@@ -139,10 +139,10 @@ def display_image(image_bytes, title="Image"):
         print(f"  Размер файла: {len(image_bytes)} байт ({len(image_bytes)/1024:.2f} КБ)")
         
         # Пытаемся показать изображение (если есть GUI)
-        try:
-            img.show(title=title)
-        except:
-            print(f"  (Не удалось отобразить изображение - возможно, нет GUI)")
+        # try:
+        #     # img.show(title=title)
+        # except:
+        #     # print(f"  (Не удалось отобразить изображение - возможно, нет GUI)")
     except Exception as e:
         print(f"Ошибка при обработке изображения: {e}")
 

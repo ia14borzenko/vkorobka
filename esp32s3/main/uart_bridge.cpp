@@ -92,8 +92,8 @@ bool uart_bridge_t::start()
         return false;
     }
 
-    // Создаем задачу для записи
-    ret = xTaskCreate(uart_tx_task, "uart_tx", 2048, this, 5, &tx_task_handle_);
+    // Создаем задачу для записи (увеличиваем стек из-за отладочного вывода)
+    ret = xTaskCreate(uart_tx_task, "uart_tx", 4096, this, 5, &tx_task_handle_);
     if (ret != pdPASS)
     {
         ESP_LOGE(TAG, "Failed to create TX task");
@@ -140,18 +140,36 @@ bool uart_bridge_t::send_message(const msg_header_t* header, const u8* payload, 
         return false;
     }
 
+    ESP_LOGI(TAG, "[DEBUG] send_message: dst=%d, payload_len=%u, header->payload_len=%u", 
+             header->destination_id, payload_len, header->payload_len);
+
     // Упаковываем сообщение
     u32 total_size = MSG_HEADER_LEN + payload_len;
     std::vector<u8>* buffer = new std::vector<u8>(total_size);
     
     u32 packed_size = msg_pack(header, payload, payload_len, buffer->data());
+    ESP_LOGI(TAG, "[DEBUG] msg_pack: packed_size=%u", packed_size);
+    
     if (packed_size == 0)
     {
+        ESP_LOGE(TAG, "[DEBUG] msg_pack failed!");
         delete buffer;
         return false;
     }
 
     buffer->resize(packed_size);
+    
+    // Показываем только критичные байты payload_len [7-10] (без больших буферов)
+    ESP_LOGI(TAG, "[PACK] payload_len[7-10]=%02X %02X %02X %02X", 
+             buffer->data()[7], buffer->data()[8], 
+             buffer->data()[9], buffer->data()[10]);
+    
+    if (payload_len > 0 && payload_len <= 2)
+    {
+        ESP_LOGI(TAG, "[PACK] Payload[0-1]=%02X %02X", 
+                 payload_len > 0 ? payload[0] : 0, 
+                 payload_len > 1 ? payload[1] : 0);
+    }
 
     // Отправляем в очередь
     if (xQueueSend(tx_queue_, &buffer, pdMS_TO_TICKS(100)) != pdTRUE)
@@ -222,6 +240,13 @@ void uart_bridge_t::uart_tx_task(void* pvParameters)
                 else
                 {
                     ESP_LOGI(TAG, "Sent %d bytes via UART", len);
+                    // Отладочный вывод: показываем только критичные байты payload_len (без больших буферов)
+                    if (len >= 11)
+                    {
+                        ESP_LOGI(TAG, "[TX] payload_len[7-10]=%02X %02X %02X %02X", 
+                                 buffer->data()[7], buffer->data()[8], 
+                                 buffer->data()[9], buffer->data()[10]);
+                    }
                 }
                 
                 delete buffer;

@@ -42,7 +42,17 @@ bool message_bridge_t::route_from_tcp(const msg_header_t* header, const u8* payl
     {
         if (uart_transport_)
         {
-            return uart_transport_->send_message(header, payload, payload_len);
+            ESP_LOGI(TAG, "[DEBUG] Routing to STM32: payload_len=%u, header->payload_len=%u", 
+                     payload_len, header->payload_len);
+            // ВАЖНО: убеждаемся, что header->payload_len совпадает с payload_len
+            msg_header_t corrected_header = *header;
+            if (corrected_header.payload_len != payload_len)
+            {
+                ESP_LOGW(TAG, "[DEBUG] Fixing payload_len: was %u, setting to %u", 
+                         corrected_header.payload_len, payload_len);
+                corrected_header.payload_len = payload_len;
+            }
+            return uart_transport_->send_message(&corrected_header, payload, payload_len);
         }
     }
 
@@ -113,14 +123,34 @@ bool message_bridge_t::process_buffer(const u8* buffer, u32 buffer_len, bool fro
         return false;
     }
 
+    ESP_LOGI(TAG, "[DEBUG] process_buffer: from_tcp=%d, buffer_len=%u", from_tcp, buffer_len);
+    
+    // Отладочный вывод: показываем байты заголовка
+    if (buffer_len >= MSG_HEADER_LEN)
+    {
+        char hex_buf[64];
+        int hex_len = 0;
+        for (int i = 0; i < MSG_HEADER_LEN && i < 12; i++)
+        {
+            hex_len += sprintf(hex_buf + hex_len, "%02X ", buffer[i]);
+        }
+        ESP_LOGI(TAG, "[DEBUG] process_buffer header bytes: %s", hex_buf);
+        ESP_LOGI(TAG, "[DEBUG] process_buffer payload_len bytes [7-10]: %02X %02X %02X %02X", 
+                 buffer[7], buffer[8], buffer[9], buffer[10]);
+    }
+
     msg_header_t header;
     const u8* payload = nullptr;
     u32 payload_len = 0;
 
     if (!msg_unpack(buffer, buffer_len, &header, &payload, &payload_len))
     {
+        ESP_LOGE(TAG, "[DEBUG] process_buffer: msg_unpack failed!");
         return false;
     }
+
+    ESP_LOGI(TAG, "[DEBUG] process_buffer unpacked: payload_len=%u, header.payload_len=%u, dst=%d", 
+             payload_len, header.payload_len, header.destination_id);
 
     if (from_tcp)
     {

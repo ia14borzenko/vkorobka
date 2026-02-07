@@ -28,6 +28,8 @@
 /* Private includes ----------------------------------------------------------*/
 /* USER CODE BEGIN Includes */
 #include <string.h>
+#include <stdio.h>
+#include "message_protocol.h"
 /* USER CODE END Includes */
 
 /* Private typedef -----------------------------------------------------------*/
@@ -240,10 +242,174 @@ char rx2_char[RXBUFUSART2] = {};
 uint32_t rxusart2buf_i = 0;
 volatile char txusart2buf[TXBUFUSART2] = {};
 
+// Буфер для накопления данных нового протокола message_protocol
+#define MSG_PROTOCOL_BUFFER_SIZE 4096
+static uint8_t msg_protocol_buffer[MSG_PROTOCOL_BUFFER_SIZE] = {};
+static uint32_t msg_protocol_buf_pos = 0;
+
 uint8_t rx2char_lag = 0x0;
 char txconst[1] = { 0x55 };
+
+// Функция для вывода заголовка на UART1 (отладчик)
+void print_header_to_uart1(const msg_header_t* header, const uint8_t* payload, uint32_t payload_len)
+{
+	char debug_msg[256];
+	int len = 0;
+	
+	len += sprintf(debug_msg + len, "[TEST RX] type=%d src=%d dst=%d len=%lu seq=%d\r\n",
+		header->msg_type, header->source_id, header->destination_id, 
+		(unsigned long)header->payload_len, header->sequence);
+	
+	// Отладочный вывод: показываем байты заголовка из буфера
+	len += sprintf(debug_msg + len, "[TEST RX] Header bytes: ");
+	for (int i = 0; i < MSG_HEADER_LEN && i < 12; i++)
+	{
+		len += sprintf(debug_msg + len, "%02X ", msg_protocol_buffer[i]);
+	}
+	len += sprintf(debug_msg + len, "\r\n");
+	
+	// Выводим информацию о реальном payload
+	if (payload != NULL && payload_len > 0)
+	{
+		len += sprintf(debug_msg + len, "[TEST RX] Payload received: %lu bytes\r\n", (unsigned long)payload_len);
+		if (payload_len <= 16)
+		{
+			len += sprintf(debug_msg + len, "[TEST RX] Payload data: ");
+			for (uint32_t i = 0; i < payload_len; i++)
+			{
+				len += sprintf(debug_msg + len, "%02X ", payload[i]);
+			}
+			len += sprintf(debug_msg + len, "\r\n");
+		}
+	}
+	else
+	{
+		len += sprintf(debug_msg + len, "[TEST RX] WARNING: No payload data (payload_len=%lu)\r\n", 
+			(unsigned long)payload_len);
+	}
+	
+	HAL_UART_Transmit(&huart1, (uint8_t*)debug_msg, len, HAL_MAX_DELAY);
+}
+
+// Union для работы с заголовком как с байтами и структурой
+typedef union
+{
+	msg_header_t header;
+	uint8_t bytes[MSG_HEADER_LEN];
+} msg_header_union_t;
+
+// Обработка нового протокола message_protocol
+void process_message_protocol(void)
+{
+	// Обрабатываем все доступные пакеты в буфере
+	while (msg_protocol_buf_pos >= MSG_HEADER_LEN)
+	{
+		// Используем union для прямого доступа к байтам
+		msg_header_union_t header_union;
+		
+		// Копируем заголовок из буфера
+		memcpy(header_union.bytes, msg_protocol_buffer, MSG_HEADER_LEN);
+		
+		// Читаем поля напрямую из байтов (little-endian)
+		msg_header_t header;
+		header.msg_type = header_union.bytes[0];
+		header.source_id = header_union.bytes[1];
+		header.destination_id = header_union.bytes[2];
+		header.route_flags = header_union.bytes[3];
+		header.priority = header_union.bytes[4];
+		
+		// Stream ID (2 bytes, little-endian): [5] = младший, [6] = старший
+		header.stream_id = (uint16_t)(header_union.bytes[5] | (header_union.bytes[6] << 8));
+		
+		// Payload length (4 bytes, little-endian): [7] = младший, [10] = старший
+		header.payload_len = (uint32_t)(header_union.bytes[7] | 
+		                                (header_union.bytes[8] << 8) | 
+		                                (header_union.bytes[9] << 16) | 
+		                                (header_union.bytes[10] << 24));
+		
+		// Sequence number (1 byte)
+		header.sequence = header_union.bytes[11];
+		
+		// Отладочный вывод для диагностики - показываем что реально в буфере
+		char debug_buf[256];
+		int dbg_len = sprintf(debug_buf, "[DEBUG] Buffer[0-11]: ");
+		for (int i = 0; i < 12 && i < MSG_HEADER_LEN; i++)
+		{
+			dbg_len += sprintf(debug_buf + dbg_len, "%02X ", msg_protocol_buffer[i]);
+		}
+		dbg_len += sprintf(debug_buf + dbg_len, "\r\n");
+		dbg_len += sprintf(debug_buf + dbg_len, "[DEBUG] Parsed: payload_len=%lu from bytes[7-10]=%02X %02X %02X %02X\r\n",
+			(unsigned long)header.payload_len,
+			header_union.bytes[7], header_union.bytes[8], 
+			header_union.bytes[9], header_union.bytes[10]);
+		dbg_len += sprintf(debug_buf + dbg_len, "[DEBUG] Buffer size: %lu bytes\r\n", (unsigned long)msg_protocol_buf_pos);
+		HAL_UART_Transmit(&huart1, (uint8_t*)debug_buf, dbg_len, HAL_MAX_DELAY);
+		
+		// Проверяем валидность заголовка
+		if (!msg_validate_header(&header))
+		{
+			// Невалидный заголовок, пропускаем один байт
+			memmove(msg_protocol_buffer, msg_protocol_buffer + 1, msg_protocol_buf_pos - 1);
+			msg_protocol_buf_pos--;
+			continue;
+		}
+		
+		// Проверяем, есть ли полный пакет
+		uint32_t total_packet_size = MSG_HEADER_LEN + header.payload_len;
+		if (msg_protocol_buf_pos < total_packet_size)
+		{
+			// Недостаточно данных, ждем еще
+			break;
+		}
+		
+		// Полный пакет получен
+		// Получаем указатель на payload
+		const uint8_t* payload = NULL;
+		uint32_t payload_len = 0;
+		
+		if (header.payload_len > 0)
+		{
+			payload = msg_protocol_buffer + MSG_HEADER_LEN;
+			payload_len = header.payload_len;
+		}
+		
+		// Проверяем, это тест для STM32?
+		if (header.destination_id == MSG_DST_STM32)
+		{
+			// Выводим заголовок и payload на UART1 (отладчик)
+			print_header_to_uart1(&header, payload, payload_len);
+		}
+			
+		// Удаляем обработанный пакет из буфера
+		memmove(msg_protocol_buffer, msg_protocol_buffer + total_packet_size, 
+			msg_protocol_buf_pos - total_packet_size);
+		msg_protocol_buf_pos -= total_packet_size;
+		
+		// Защита от переполнения
+		if (msg_protocol_buf_pos >= MSG_PROTOCOL_BUFFER_SIZE - 1)
+		{
+			// Буфер переполнен, очищаем
+			msg_protocol_buf_pos = 0;
+			break;
+		}
+	}
+}
+
 void uart2rx_cb(void)
 {
+	uint8_t received_byte = rx2_char[rxusart2buf_i + rx2char_lag];
+	
+	// Добавляем байт в буфер нового протокола (если есть место)
+	if (msg_protocol_buf_pos < MSG_PROTOCOL_BUFFER_SIZE - 1)
+	{
+		msg_protocol_buffer[msg_protocol_buf_pos] = received_byte;
+		msg_protocol_buf_pos++;
+		
+		// Пытаемся обработать новый протокол
+		process_message_protocol();
+	}
+	
+	// Старая логика для совместимости
 	HAL_UART_Transmit(&huart2, rx2_char+rxusart2buf_i+rx2char_lag, 1, HAL_MAX_DELAY);
 	
 	if (rx2_char[rxusart2buf_i+rx2char_lag] == 0x0D)
