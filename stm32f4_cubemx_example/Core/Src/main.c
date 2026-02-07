@@ -343,6 +343,18 @@ void process_message_protocol(void)
 			(unsigned long)payload_len);
 		HAL_UART_Transmit(&huart1, (uint8_t*)debug_buf, dbg_len, HAL_MAX_DELAY);
 		
+		// Отладочный вывод первых байт payload для маленьких сообщений
+		if (payload != NULL && payload_len > 0 && payload_len <= 16)
+		{
+			dbg_len = sprintf(debug_buf, "[RX] Payload bytes: ");
+			for (uint32_t i = 0; i < payload_len; i++)
+			{
+				dbg_len += sprintf(debug_buf + dbg_len, "%02X ", payload[i]);
+			}
+			dbg_len += sprintf(debug_buf + dbg_len, "\r\n");
+			HAL_UART_Transmit(&huart1, (uint8_t*)debug_buf, dbg_len, HAL_MAX_DELAY);
+		}
+		
 		// Проверяем, это сообщение для STM32?
 		if (header.destination_id == MSG_DST_STM32)
 		{
@@ -386,14 +398,20 @@ void process_message_protocol(void)
 					}
 				}
 			}
-			// Обработка данных (изображения для теста)
+			// Обработка данных (изображения для теста или тестовые данные)
 			else if (header.msg_type == MSG_TYPE_DATA && payload != NULL && payload_len > 0)
 			{
 				// Проверяем размер payload (ограничиваем размером статического буфера)
 				uint32_t max_payload = TX_BUFFER_SIZE - MSG_HEADER_LEN;
 				if (payload_len <= max_payload)
 				{
-					// Возвращаем изображение обратно (аналогично ESP32)
+					// Отладочный вывод
+					char debug_buf[128];
+					int dbg_len = sprintf(debug_buf, "[TX] Sending response: len=%lu\r\n", 
+						(unsigned long)payload_len);
+					HAL_UART_Transmit(&huart1, (uint8_t*)debug_buf, dbg_len, HAL_MAX_DELAY);
+					
+					// Возвращаем данные обратно (аналогично ESP32)
 					msg_header_t response_header = msg_create_header(
 						MSG_TYPE_RESPONSE,
 						MSG_SRC_STM32,
@@ -404,7 +422,42 @@ void process_message_protocol(void)
 					u32 packed_size = msg_pack(&response_header, payload, payload_len, tx_buffer);
 					if (packed_size > 0)
 					{
-						HAL_UART_Transmit(&huart2, tx_buffer, packed_size, HAL_MAX_DELAY);
+						// Отладочный вывод о размере отправляемого пакета
+						dbg_len = sprintf(debug_buf, "[TX] Packed size: %lu bytes\r\n", 
+							(unsigned long)packed_size);
+						HAL_UART_Transmit(&huart1, (uint8_t*)debug_buf, dbg_len, HAL_MAX_DELAY);
+						
+						// Отладочный вывод первых байт отправляемого пакета
+//						if (packed_size <= 16)
+//						{
+//							char hex_buf[64];
+//							int hex_len = sprintf(hex_buf, "[TX] Sending bytes: ");
+//							for (uint32_t i = 0; i < packed_size; i++)
+//							{
+//								hex_len += sprintf(hex_buf + hex_len, "%02X ", tx_buffer[i]);
+//							}
+//							hex_len += sprintf(hex_buf + hex_len, "\r\n");
+//							HAL_UART_Transmit(&huart1, (uint8_t*)hex_buf, hex_len, HAL_MAX_DELAY);
+//						}
+						
+						// Отправляем через UART2 (блокирующий режим, как на UART1)
+						HAL_StatusTypeDef tx_status = HAL_UART_Transmit(&huart2, tx_buffer, packed_size, HAL_MAX_DELAY);
+						if (tx_status == HAL_OK)
+						{
+							dbg_len = sprintf(debug_buf, "[TX] Transmission completed (%lu bytes)\r\n", 
+								(unsigned long)packed_size);
+							HAL_UART_Transmit(&huart1, (uint8_t*)debug_buf, dbg_len, HAL_MAX_DELAY);
+						}
+						else
+						{
+							dbg_len = sprintf(debug_buf, "[TX] ERROR: Transmission failed (status=%d)\r\n", tx_status);
+							HAL_UART_Transmit(&huart1, (uint8_t*)debug_buf, dbg_len, HAL_MAX_DELAY);
+						}
+					}
+					else
+					{
+						dbg_len = sprintf(debug_buf, "[TX] ERROR: msg_pack failed\r\n");
+						HAL_UART_Transmit(&huart1, (uint8_t*)debug_buf, dbg_len, HAL_MAX_DELAY);
 					}
 				}
 				else
@@ -435,7 +488,8 @@ void process_message_protocol(void)
 
 void uart2rx_cb(void)
 {
-	uint8_t received_byte = rx2_char[rxusart2buf_i + rx2char_lag];
+	// Читаем байт напрямую из регистра данных UART (правильный способ)
+	uint8_t received_byte = (uint8_t)(huart2.Instance->DR & 0xFF);
 	
 	// Добавляем байт в буфер нового протокола (если есть место)
 	if (msg_protocol_buf_pos < MSG_PROTOCOL_BUFFER_SIZE - 1)
@@ -445,6 +499,13 @@ void uart2rx_cb(void)
 		
 		// НЕ вызываем process_message_protocol() в прерывании!
 		// Обработка будет в основном цикле
+	}
+	else
+	{
+		// Буфер переполнен, пропускаем байт и выводим ошибку
+		char err_buf[64];
+		int err_len = sprintf(err_buf, "[ERROR] Message buffer overflow, byte dropped.\r\n");
+		HAL_UART_Transmit(&huart1, (uint8_t*)err_buf, err_len, HAL_MAX_DELAY);
 	}
 	
 	// Старая логика для совместимости (можно убрать позже)
@@ -458,6 +519,7 @@ void uart2rx_cb(void)
 		++rxusart2buf_i;
 	}
 	
+	// Запускаем следующий прием
 	HAL_UART_Receive_IT(&huart2, rx2_char+rxusart2buf_i, 1);
 }
 
@@ -471,6 +533,13 @@ void HAL_UART_RxCpltCallback(UART_HandleTypeDef *huart)
 	{
 		uart2rx_cb();
 	}
+}
+
+void HAL_UART_TxCpltCallback(UART_HandleTypeDef *huart)
+{
+	// Callback больше не используется для UART2, так как используется блокирующая передача
+	// Оставлен для совместимости, если понадобится в будущем
+	(void)huart;
 }
 	
 
@@ -528,10 +597,13 @@ int main(void)
   MX_I2S3_Init();
   MX_SPI1_Init();
   /* USER CODE BEGIN 2 */
+	char msg[] = "zhopa s ogurcami";
+	HAL_UART_Transmit(&huart2, (uint8_t*)msg, 15, HAL_MAX_DELAY);
 	HAL_UART_Receive_IT(&huart1, rx1_char, 1);
 	HAL_UART_Receive_IT(&huart2, rx2_char, 1);
 	//HAL_UART_Transmit_IT(&huart1,txusart1buf,strlen(txusart1buf));
 	HAL_TIM_Base_Start_IT(&htim2);
+	HAL_UART_Transmit(&huart2, (uint8_t*)msg, 15, HAL_MAX_DELAY);
 	
 	// Пример использования C++ классов через C-обертки:
 	// #include "uart_handler_c_wrapper.h"
@@ -573,7 +645,7 @@ int main(void)
     process_message_protocol();
     
     // Небольшая задержка для снижения нагрузки на CPU
-    HAL_Delay(1);
+    //HAL_Delay(1);
   }
   /* USER CODE END 3 */
 }

@@ -44,6 +44,7 @@ private:
     TaskHandle_t rx_task_handle_;
     TaskHandle_t tx_task_handle_;
     QueueHandle_t tx_queue_;
+    QueueHandle_t uart_event_queue_;  // Очередь событий UART
     
     std::vector<u8> rx_buffer_;
     

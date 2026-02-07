@@ -73,6 +73,9 @@ bool message_bridge_t::route_from_uart(const msg_header_t* header, const u8* pay
         return false;
     }
 
+    ESP_LOGI(TAG, "[route_from_uart] Routing message: type=%d, src=%d, dst=%d, len=%u",
+             header->msg_type, header->source_id, header->destination_id, payload_len);
+
     msg_destination_t dst = (msg_destination_t)header->destination_id;
 
     // Если сообщение для Windows, EXTERNAL (Python) или BROADCAST, отправляем через TCP
@@ -80,14 +83,27 @@ bool message_bridge_t::route_from_uart(const msg_header_t* header, const u8* pay
     {
         if (tcp_transport_ && tcp_transport_->is_connected())
         {
+            ESP_LOGI(TAG, "[route_from_uart] Message for %s, forwarding via TCP", 
+                     dst == MSG_DST_WIN ? "WIN" : "EXTERNAL");
+            
             // Упаковываем сообщение
             u8 buffer[MSG_HEADER_LEN + payload_len];
             u32 packed_size = msg_pack(header, payload, payload_len, buffer);
             
             if (packed_size > 0)
             {
-                return tcp_transport_->send(reinterpret_cast<const char*>(buffer), static_cast<int>(packed_size));
+                bool result = tcp_transport_->send(reinterpret_cast<const char*>(buffer), static_cast<int>(packed_size));
+                ESP_LOGI(TAG, "[route_from_uart] TCP send result: %s", result ? "SUCCESS" : "FAILED");
+                return result;
             }
+            else
+            {
+                ESP_LOGE(TAG, "[route_from_uart] msg_pack failed");
+            }
+        }
+        else
+        {
+            ESP_LOGW(TAG, "[route_from_uart] TCP not connected, cannot forward message");
         }
     }
 
