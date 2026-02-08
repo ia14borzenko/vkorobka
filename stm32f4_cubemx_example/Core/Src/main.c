@@ -370,6 +370,20 @@ void process_message_protocol(void)
 		// Полный пакет успешно распарсен
 		uint32_t total_packet_size = MSG_HEADER_LEN + payload_len;
 		
+		// КРИТИЧЕСКАЯ ПРОВЕРКА: защита от повреждения памяти при memmove
+		// Если total_packet_size > msg_protocol_buf_pos, то memmove попытается скопировать
+		// огромное количество данных (из-за unsigned overflow), что вызовет INVPC fault
+		if (total_packet_size > msg_protocol_buf_pos)
+		{
+			// Некорректный размер пакета - сбрасываем буфер
+			char debug_buf[128];
+			int dbg_len = sprintf(debug_buf, "[RX] ERROR: Packet size mismatch (packet=%lu, buf=%lu), clearing\r\n",
+				(unsigned long)total_packet_size, (unsigned long)msg_protocol_buf_pos);
+			HAL_UART_Transmit(&huart1, (uint8_t*)debug_buf, dbg_len, HAL_MAX_DELAY);
+			msg_protocol_buf_pos = 0;
+			break;
+		}
+		
 		// Отладочный вывод
 		char debug_buf[256];
 		int dbg_len = sprintf(debug_buf, "[RX] type=%d src=%d dst=%d len=%lu\r\n",
@@ -506,9 +520,29 @@ void process_message_protocol(void)
 		}
 		
 		// Удаляем обработанный пакет из буфера
-		memmove(msg_protocol_buffer, msg_protocol_buffer + total_packet_size, 
-			msg_protocol_buf_pos - total_packet_size);
-		msg_protocol_buf_pos -= total_packet_size;
+		// ВАЖНО: total_packet_size уже проверен выше, но проверяем еще раз для безопасности
+		if (total_packet_size <= msg_protocol_buf_pos)
+		{
+			uint32_t remaining_size = msg_protocol_buf_pos - total_packet_size;
+			
+			// Сдвигаем оставшиеся данные (если есть)
+			if (remaining_size > 0)
+			{
+				memmove(msg_protocol_buffer, msg_protocol_buffer + total_packet_size, remaining_size);
+			}
+			// Обновляем счетчик (всегда, даже если remaining_size == 0)
+			msg_protocol_buf_pos = remaining_size;
+		}
+		else
+		{
+			// Это не должно происходить, так как мы проверили выше, но на всякий случай
+			char debug_buf[128];
+			int dbg_len = sprintf(debug_buf, "[RX] ERROR: Cannot remove packet (size=%lu, buf=%lu), clearing\r\n",
+				(unsigned long)total_packet_size, (unsigned long)msg_protocol_buf_pos);
+			HAL_UART_Transmit(&huart1, (uint8_t*)debug_buf, dbg_len, HAL_MAX_DELAY);
+			msg_protocol_buf_pos = 0;
+			break;
+		}
 		
 		// Защита от переполнения
 		if (msg_protocol_buf_pos >= MSG_PROTOCOL_BUFFER_SIZE - 1)
