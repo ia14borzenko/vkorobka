@@ -255,17 +255,18 @@ void tcp_t::process_rx_buffer(void)
                     // Попробуем еще раз распарсить
                     continue;
                 }
-            }
-            
-            // Заголовок невалиден или данные повреждены - пропускаем один байт
-            ESP_LOGW(TAG, "Invalid header or corrupted data, skipping byte");
-            if (rx_buffer.size() > 0)
-            {
-                rx_buffer.erase(rx_buffer.begin());
-                continue;
+                else
+                {
+                    // Заголовок невалиден - сбрасываем буфер
+                    // Правило: если не получилось обработать заголовок - он сбрасывается без уведомления отправителю
+                    ESP_LOGW(TAG, "Invalid header, clearing buffer (%zu bytes)", rx_buffer.size());
+                    rx_buffer.clear();
+                    break;
+                }
             }
             else
             {
+                // Недостаточно данных даже для заголовка - ждем
                 break;
             }
         }

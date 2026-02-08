@@ -177,17 +177,14 @@ void uart_handler_t::process_rx_buffer()
         if (!msg_unpack(header_buffer, MSG_HEADER_LEN, &header, &payload, &payload_len))
         {
             // Недостаточно данных или ошибка парсинга
-            // Если это не начало валидного сообщения, пропускаем байт
-            if (rx_buffer_.available() > MSG_HEADER_LEN * 2)
+            // Правило: если не получилось обработать заголовок - он сбрасывается без уведомления отправителю
+            if (rx_buffer_.available() >= MSG_HEADER_LEN)
             {
-                u8 dummy;
-                rx_buffer_.pop(&dummy, 1);
+                // Есть достаточно данных для заголовка, но он невалиден - сбрасываем буфер
+                rx_buffer_.clear();
             }
-            else
-            {
-                // Ждем больше данных
-                break;
-            }
+            // Если данных недостаточно даже для заголовка - просто ждем
+            break;
         }
         else
         {

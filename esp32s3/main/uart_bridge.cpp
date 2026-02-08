@@ -103,7 +103,9 @@ bool uart_bridge_t::start()
     }
 
     // Создаем задачу для чтения
-    BaseType_t ret = xTaskCreate(uart_rx_task, "uart_rx", 4096, this, 5, &rx_task_handle_);
+    // Увеличиваем размер стека для обработки больших сообщений (до 4KB payload)
+    // 8192 байт должно быть достаточно для обработки больших сообщений и глубоких вызовов callback
+    BaseType_t ret = xTaskCreate(uart_rx_task, "uart_rx", 8192, this, 5, &rx_task_handle_);
     if (ret != pdPASS)
     {
         ESP_LOGE(TAG, "Failed to create RX task");
@@ -348,25 +350,55 @@ void uart_bridge_t::process_rx_buffer()
 {
     while (rx_buffer_.size() >= MSG_HEADER_LEN)
     {
+        // Проверяем, достаточно ли данных для заголовка
+        if (rx_buffer_.size() < MSG_HEADER_LEN)
+        {
+            // Недостаточно данных даже для заголовка - ждем
+            break;
+        }
+        
+        // Читаем заголовок вручную для проверки валидности
+        msg_header_t temp_header;
+        temp_header.msg_type = rx_buffer_[0];
+        temp_header.source_id = rx_buffer_[1];
+        temp_header.destination_id = rx_buffer_[2];
+        temp_header.route_flags = rx_buffer_[3];
+        temp_header.priority = rx_buffer_[4];
+        temp_header.stream_id = (u16)(rx_buffer_[5] | (rx_buffer_[6] << 8));
+        temp_header.payload_len = (u32)(rx_buffer_[7] | (rx_buffer_[8] << 8) | 
+            (rx_buffer_[9] << 16) | (rx_buffer_[10] << 24));
+        temp_header.sequence = rx_buffer_[11];
+        
+        // Проверяем валидность заголовка
+        if (!msg_validate_header(&temp_header))
+        {
+            // Заголовок невалиден - сбрасываем буфер
+            // Правило: если не получилось обработать заголовок - он сбрасывается без уведомления отправителю
+            ESP_LOGW(TAG, "[RX] Invalid header, clearing buffer (%zu bytes)", rx_buffer_.size());
+            rx_buffer_.clear();
+            break;
+        }
+        
+        // Заголовок валиден, проверяем, достаточно ли данных для полного пакета
+        u32 expected_total = MSG_HEADER_LEN + temp_header.payload_len;
+        if (rx_buffer_.size() < expected_total)
+        {
+            // Данных недостаточно для полного пакета - ждем
+            break;
+        }
+        
+        // Данных достаточно, пытаемся распарсить сообщение
         msg_header_t header;
         const u8* payload = nullptr;
         u32 payload_len = 0;
-
+        
         if (!msg_unpack(rx_buffer_.data(), static_cast<u32>(rx_buffer_.size()), &header, &payload, &payload_len))
         {
-            // Недостаточно данных или ошибка парсинга
-            // Если это не начало валидного сообщения, пропускаем байт
-            if (rx_buffer_.size() > MSG_HEADER_LEN * 2)
-            {
-                // Пропускаем первый байт и пытаемся снова
-                ESP_LOGW(TAG, "[RX] Invalid header, skipping byte. Buffer size: %zu", rx_buffer_.size());
-                rx_buffer_.erase(rx_buffer_.begin());
-            }
-            else
-            {
-                // Ждем больше данных
-                break;
-            }
+            // Это не должно происходить, так как мы уже проверили валидность заголовка
+            // Но на всякий случай сбрасываем буфер
+            ESP_LOGE(TAG, "[RX] msg_unpack failed unexpectedly, clearing buffer (%zu bytes)", rx_buffer_.size());
+            rx_buffer_.clear();
+            break;
         }
         else
         {

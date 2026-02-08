@@ -314,23 +314,57 @@ void process_message_protocol(void)
 		const u8* payload = NULL;
 		u32 payload_len = 0;
 		
-		// Пытаемся распарсить сообщение
+		// Проверяем, достаточно ли данных для заголовка
+		if (msg_protocol_buf_pos < MSG_HEADER_LEN)
+		{
+			// Недостаточно данных даже для заголовка - ждем
+			break;
+		}
+		
+		// Читаем заголовок вручную для проверки валидности
+		msg_header_t temp_header;
+		temp_header.msg_type = msg_protocol_buffer[0];
+		temp_header.source_id = msg_protocol_buffer[1];
+		temp_header.destination_id = msg_protocol_buffer[2];
+		temp_header.route_flags = msg_protocol_buffer[3];
+		temp_header.priority = msg_protocol_buffer[4];
+		temp_header.stream_id = (u16)(msg_protocol_buffer[5] | (msg_protocol_buffer[6] << 8));
+		temp_header.payload_len = (u32)(msg_protocol_buffer[7] | (msg_protocol_buffer[8] << 8) | 
+			(msg_protocol_buffer[9] << 16) | (msg_protocol_buffer[10] << 24));
+		temp_header.sequence = msg_protocol_buffer[11];
+		
+		// Проверяем валидность заголовка
+		if (!msg_validate_header(&temp_header))
+		{
+			// Заголовок невалиден - сбрасываем буфер
+			// Правило: если не получилось обработать заголовок - он сбрасывается без уведомления отправителю
+			char debug_buf[128];
+			int dbg_len = sprintf(debug_buf, "[RX] Invalid header, clearing buffer (%lu bytes)\r\n", 
+				(unsigned long)msg_protocol_buf_pos);
+			HAL_UART_Transmit(&huart1, (uint8_t*)debug_buf, dbg_len, HAL_MAX_DELAY);
+			msg_protocol_buf_pos = 0;
+			break;
+		}
+		
+		// Заголовок валиден, проверяем, достаточно ли данных для полного пакета
+		uint32_t expected_total = MSG_HEADER_LEN + temp_header.payload_len;
+		if (msg_protocol_buf_pos < expected_total)
+		{
+			// Данных недостаточно для полного пакета - ждем
+			break;
+		}
+		
+		// Данных достаточно, пытаемся распарсить сообщение
 		if (!msg_unpack(msg_protocol_buffer, msg_protocol_buf_pos, &header, &payload, &payload_len))
 		{
-			// Недостаточно данных или ошибка парсинга
-			// Если это не начало валидного сообщения, пропускаем байт
-			if (msg_protocol_buf_pos > MSG_HEADER_LEN * 2)
-			{
-				// Пропускаем один байт для поиска начала сообщения
-				memmove(msg_protocol_buffer, msg_protocol_buffer + 1, msg_protocol_buf_pos - 1);
-				msg_protocol_buf_pos--;
-			}
-			else
-			{
-				// Ждем больше данных
-				break;
-			}
-			continue;
+			// Это не должно происходить, так как мы уже проверили валидность заголовка
+			// Но на всякий случай сбрасываем буфер
+			char debug_buf[128];
+			int dbg_len = sprintf(debug_buf, "[RX] msg_unpack failed unexpectedly, clearing buffer (%lu bytes)\r\n", 
+				(unsigned long)msg_protocol_buf_pos);
+			HAL_UART_Transmit(&huart1, (uint8_t*)debug_buf, dbg_len, HAL_MAX_DELAY);
+			msg_protocol_buf_pos = 0;
+			break;
 		}
 		
 		// Полный пакет успешно распарсен

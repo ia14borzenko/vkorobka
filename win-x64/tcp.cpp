@@ -764,10 +764,11 @@ void tcp_t::process_rx_buffer()
                 }
                 else
                 {
-                    // Заголовок невалиден или данные повреждены - пропускаем один байт
-                    std::cerr << "[tcp] Invalid header or corrupted data, skipping byte\n";
-                    rx_buffer.erase(rx_buffer.begin());
-                    continue;
+                    // Заголовок невалиден - сбрасываем буфер
+                    // Правило: если не получилось обработать заголовок - он сбрасывается без уведомления отправителю
+                    std::cerr << "[tcp] Invalid header, clearing buffer (" << rx_buffer.size() << " bytes)\n";
+                    rx_buffer.clear();
+                    return;
                 }
             }
             else
