@@ -128,13 +128,11 @@ void send_t::exec(cctx_t& ctx)
     std::string dest_str = ctx.get(0);
     if (dest_str == "esp32" || dest_str == "esp")
         destination = MSG_DST_ESP32;
-    else if (dest_str == "stm32" || dest_str == "stm")
-        destination = MSG_DST_STM32;
     else if (dest_str == "win" || dest_str == "windows")
         destination = MSG_DST_WIN;
     else if (!dest_str.empty())
     {
-        std::cout << ANSI_ERR << "Invalid destination. Use: esp32, stm32, win" << ANSI_ENDL << std::endl;
+        std::cout << ANSI_ERR << "Invalid destination. Use: esp32, win" << ANSI_ENDL << std::endl;
         return;
     }
 

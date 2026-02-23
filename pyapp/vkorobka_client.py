@@ -122,7 +122,7 @@ class VkorobkaClient:
         Отправляет тестовое сообщение с изображением
         
         Args:
-            destination: Назначение ("win", "esp32", "stm32")
+            destination: Назначение ("win", "esp32")
             image_data: JPG данные изображения
             test_id: Уникальный ID теста (генерируется автоматически если не указан)
         
@@ -215,7 +215,7 @@ class VkorobkaClient:
         Тестирует компонент: отправляет изображение и получает отзеркаленное
         
         Args:
-            destination: Назначение ("win", "esp32", "stm32")
+            destination: Назначение ("win", "esp32")
             image_data: JPG данные для отправки
         
         Returns:

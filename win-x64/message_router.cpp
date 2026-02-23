@@ -171,8 +171,8 @@ bool message_router_t::route_message(const msg_header_t& header, const u8* paylo
         invoke_handlers(header, payload, payload_len);
     }
     
-    // Если сообщение для другого компонента (ESP32/STM32), отправляем через транспорт
-    if (dst == MSG_DST_ESP32 || dst == MSG_DST_STM32)
+    // Если сообщение для другого компонента (ESP32), отправляем через транспорт
+    if (dst == MSG_DST_ESP32)
     {
         return send_message(header, payload, payload_len);
     }
@@ -266,10 +266,9 @@ bool message_router_t::send_message(const msg_header_t& header, const u8* payloa
     msg_destination_t dst = (msg_destination_t)header.destination_id;
     
     // Определяем транспорт в зависимости от получателя
-    if (dst == MSG_DST_ESP32 || dst == MSG_DST_STM32)
+    if (dst == MSG_DST_ESP32)
     {
-        std::cout << "[router] [DEBUG] Sending to " << (dst == MSG_DST_ESP32 ? "ESP32" : "STM32") 
-                  << " via TCP, total size=" << packed_size << " bytes" << std::endl;
+        std::cout << "[router] [DEBUG] Sending to ESP32 via TCP, total size=" << packed_size << " bytes" << std::endl;
         // Отправляем через TCP (к ESP32)
         if (tcp_transport_ && tcp_transport_->is_connected())
         {
@@ -379,7 +378,6 @@ bool message_router_t::parse_json_message(const std::string& json_str, msg_heade
     std::string dest_str = extract_json_value(json_str, "destination");
     if (dest_str == "win") header.destination_id = MSG_DST_WIN;
     else if (dest_str == "esp32") header.destination_id = MSG_DST_ESP32;
-    else if (dest_str == "stm32") header.destination_id = MSG_DST_STM32;
     else if (dest_str == "external") header.destination_id = MSG_DST_EXTERNAL;
     else if (dest_str == "broadcast") header.destination_id = MSG_DST_BROADCAST;
     else return false;
@@ -482,9 +480,9 @@ std::string message_router_t::create_json_message(const msg_header_t& header, co
     json << "\"source\":\"";
     switch (header.source_id)
     {
-    case MSG_SRC_WIN: json << "win"; break;
-    case MSG_SRC_ESP32: json << "esp32"; break;
-    case MSG_SRC_STM32: json << "stm32"; break;
+    case MSG_SRC_WIN:      json << "win"; break;
+    case MSG_SRC_ESP32:    json << "esp32"; break;
+    case MSG_SRC_STM32:    json << "legacy_stm32"; break; // legacy, не используется в новой архитектуре
     case MSG_SRC_EXTERNAL: json << "external"; break;
     default: json << "unknown"; break;
     }
@@ -494,9 +492,9 @@ std::string message_router_t::create_json_message(const msg_header_t& header, co
     json << "\"destination\":\"";
     switch (header.destination_id)
     {
-    case MSG_DST_WIN: json << "win"; break;
-    case MSG_DST_ESP32: json << "esp32"; break;
-    case MSG_DST_STM32: json << "stm32"; break;
+    case MSG_DST_WIN:      json << "win"; break;
+    case MSG_DST_ESP32:    json << "esp32"; break;
+    case MSG_DST_STM32:    json << "legacy_stm32"; break; // legacy, не используется в новой архитектуре
     case MSG_DST_EXTERNAL: json << "external"; break;
     case MSG_DST_BROADCAST: json << "broadcast"; break;
     default: json << "unknown"; break;

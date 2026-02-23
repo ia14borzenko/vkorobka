@@ -207,8 +207,7 @@ void tcp_t::process_rx_buffer(void)
                 {
                     g_message_bridge->process_buffer(
                         reinterpret_cast<const u8*>(rx_buffer.data()), 
-                        static_cast<u32>(expected_total), 
-                        true  // from_tcp
+                        static_cast<u32>(expected_total)
                     );
                 }
                 

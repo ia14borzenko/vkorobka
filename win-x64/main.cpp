@@ -109,20 +109,20 @@ void handle_new_message(const msg_header_t& header, const u8* payload, u32 paylo
     std::cout << "  Source: " << static_cast<int>(header.source_id) 
               << (header.source_id == MSG_SRC_ESP32 ? " (ESP32)" : 
                   header.source_id == MSG_SRC_WIN ? " (WIN)" :
-                  header.source_id == MSG_SRC_STM32 ? " (STM32)" : " (EXTERNAL)") << std::endl;
+                  header.source_id == MSG_SRC_EXTERNAL ? " (EXTERNAL)" : " (LEGACY_STM32)") << std::endl;
     std::cout << "  Destination: " << static_cast<int>(header.destination_id) 
               << (header.destination_id == MSG_DST_EXTERNAL ? " (EXTERNAL)" : 
                   header.destination_id == MSG_DST_WIN ? " (WIN)" :
-                  header.destination_id == MSG_DST_ESP32 ? " (ESP32)" : " (STM32)") << std::endl;
+                  header.destination_id == MSG_DST_ESP32 ? " (ESP32)" : " (LEGACY_STM32)") << std::endl;
     std::cout << "  Priority: " << static_cast<int>(header.priority) << std::endl;
     std::cout << "  Payload length: " << header.payload_len << " bytes" << std::endl;
     
-    // Обработка ответов от ESP32 и STM32 (включая изображения)
-    if ((header.source_id == MSG_SRC_ESP32 || header.source_id == MSG_SRC_STM32) && 
+    // Обработка ответов от ESP32 (включая изображения)
+    if (header.source_id == MSG_SRC_ESP32 && 
         header.msg_type == MSG_TYPE_RESPONSE && payload && payload_len > 0)
     {
-        const char* component_name = (header.source_id == MSG_SRC_ESP32) ? "ESP32" : "STM32";
-        msg_destination_t dst_key = (header.source_id == MSG_SRC_ESP32) ? MSG_DST_ESP32 : MSG_DST_STM32;
+        const char* component_name = "ESP32";
+        msg_destination_t dst_key = MSG_DST_ESP32;
         
         std::cout << ANSI_INFO << "[app] [HANDLE] Processing response from " << component_name 
                   << ", payload_len=" << payload_len << ANSI_ENDL;
@@ -163,7 +163,7 @@ void handle_new_message(const msg_header_t& header, const u8* payload, u32 paylo
         std::string client_ip;
         int client_port = 0;
         
-        // Ищем test_id по destination (ESP32 -> MSG_DST_ESP32, STM32 -> MSG_DST_STM32)
+        // Ищем test_id по destination (ESP32 -> MSG_DST_ESP32)
         {
             std::lock_guard<std::mutex> lock(g_destination_to_test_id_mutex);
             auto it = g_destination_to_test_id.find(dst_key);

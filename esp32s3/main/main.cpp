@@ -13,7 +13,7 @@
 // Режим отладки дисплея:
 // если определить этот макрос (например, через CMake или просто раскомментировать строку),
 // стек Wi‑Fi и TCP клиент НЕ будут запускаться, останется только работа дисплея.
-#define LCD_DEBUG_NO_NET
+// #define LCD_DEBUG_NO_NET
 
 #include "esp_lcd_panel_io.h"
 #include "i80_lcd_bus.hpp"
@@ -44,7 +44,6 @@ static Ili9486Display* s_lcd = nullptr;
 static wifi_t* g_wifi = nullptr;
 static tcp_t* g_tcp = nullptr;
 message_bridge_t* g_message_bridge = nullptr;  // Убрано static для доступа из tcp.cpp
-static uart_bridge_t* g_uart_bridge = nullptr;
 
 // Обработчик новых сообщений через message_bridge
 static void handle_new_message(const msg_header_t* header, const u8* payload, u32 payload_len)
@@ -218,15 +217,15 @@ static void handle_packet(cmdcode_t cmd_code, const char* payload, u32 payload_l
     ESP_LOGW(TAG, "Note: All communication should use the new message_protocol");
     
     // Пытаемся обработать как новый протокол (fallback)
-    if (g_message_bridge && payload_len >= MSG_HEADER_LEN)
-    {
-        const u8* buffer = reinterpret_cast<const u8*>(payload);
-        if (g_message_bridge->process_buffer(buffer, payload_len, true))
+        if (g_message_bridge && payload_len >= MSG_HEADER_LEN)
         {
-            // Успешно обработано как новое сообщение
-            return;
+            const u8* buffer = reinterpret_cast<const u8*>(payload);
+            if (g_message_bridge->process_buffer(buffer, payload_len))
+            {
+                // Успешно обработано как новое сообщение
+                return;
+            }
         }
-    }
     
     // Старая обработка команд больше не используется
     if (false && cmd_code == CMD_WIN && payload_len > 0 && payload != nullptr) {
@@ -525,41 +524,19 @@ extern "C" void app_main(void) {
     g_wifi->wait_for_connection();
     ESP_LOGI(TAG, "Wi-Fi connected");
     
-    // Инициализация UART bridge
-    g_uart_bridge = new uart_bridge_t(UART_NUM_2, 115200);
-    if (!g_uart_bridge->init(17, 16))  // TX=17, RX=16 (настройте под вашу плату)
-    {
-        ESP_LOGE(TAG, "UART bridge initialization failed");
-        return;
-    }
-    if (!g_uart_bridge->start())
-    {
-        ESP_LOGE(TAG, "UART bridge start failed");
-        return;
-    }
-    ESP_LOGI(TAG, "UART bridge started");
-
     // Инициализация message bridge
     g_message_bridge = new message_bridge_t();
-    g_message_bridge->init(nullptr, g_uart_bridge);  // TCP будет установлен позже
+    g_message_bridge->init(nullptr);  // TCP будет установлен позже
     g_message_bridge->register_handler(MSG_TYPE_COMMAND, handle_new_message);
     g_message_bridge->register_handler(MSG_TYPE_DATA, handle_new_message);
     g_message_bridge->register_handler(MSG_TYPE_STREAM, handle_new_message);
-    
-    // Устанавливаем callback для UART
-    g_uart_bridge->set_message_callback([](const msg_header_t* header, const u8* payload, u32 payload_len) {
-        if (g_message_bridge)
-        {
-            g_message_bridge->route_from_uart(header, payload, payload_len);
-        }
-    });
     
     // Инициализация TCP
     g_tcp = new tcp_t(SERVER_IP, SERVER_PORT, g_wifi);
     g_tcp->set_packet_callback(handle_packet);
     
     // Устанавливаем TCP в message_bridge
-    g_message_bridge->init(g_tcp, g_uart_bridge);
+    g_message_bridge->init(g_tcp);
     
     if (!g_tcp->start()) {
         ESP_LOGE(TAG, "TCP client start failed");

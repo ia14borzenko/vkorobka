@@ -5,6 +5,14 @@
 extern "C" {
 #endif
 
+// Общий бинарный протокол сообщений для цепочки:
+//   pyapp (external) ↔ win-x64 (Windows) ↔ esp32s3 (MCU)
+//
+// STM32 идентификаторы (MSG_SRC_STM32 / MSG_DST_STM32) сохранены
+// только для совместимости с legacy-проектами в папках stm32f4*.
+// В актуальной архитектуре все команды и данные для периферии
+// (дисплей, микрофон, динамик) должны адресоваться на ESP32.
+
 #include "my_types.h"
 
 // Размер заголовка сообщения (12 bytes)
@@ -23,19 +31,19 @@ typedef enum
 // ID компонентов системы
 typedef enum
 {
-    MSG_SRC_WIN = 0x01,       // Windows приложение
-    MSG_SRC_ESP32 = 0x02,     // ESP32 микроконтроллер
-    MSG_SRC_STM32 = 0x03,     // STM32 микроконтроллер
-    MSG_SRC_EXTERNAL = 0x04   // Внешнее приложение (Python и т.д.)
+    MSG_SRC_WIN      = 0x01,  // Windows приложение (win-x64)
+    MSG_SRC_ESP32    = 0x02,  // ESP32-S3 микроконтроллер (основной MCU в актуальной архитектуре)
+    MSG_SRC_STM32    = 0x03,  // STM32 микроконтроллер (LEGACY, используется только в старых проектах stm32f4*)
+    MSG_SRC_EXTERNAL = 0x04   // Внешнее приложение (Python и т.д., pyapp)
 } msg_source_t;
 
 // ID получателей
 typedef enum
 {
-    MSG_DST_WIN = 0x01,       // Windows приложение
-    MSG_DST_ESP32 = 0x02,     // ESP32 микроконтроллер
-    MSG_DST_STM32 = 0x03,     // STM32 микроконтроллер
-    MSG_DST_EXTERNAL = 0x04,  // Внешнее приложение
+    MSG_DST_WIN       = 0x01, // Windows приложение (win-x64)
+    MSG_DST_ESP32     = 0x02, // ESP32-S3 микроконтроллер (основной получатель команд/данных)
+    MSG_DST_STM32     = 0x03, // STM32 микроконтроллер (LEGACY, больше не используется в основном приложении)
+    MSG_DST_EXTERNAL  = 0x04, // Внешнее приложение (pyapp и другие клиенты)
     MSG_DST_BROADCAST = 0xFF  // Широковещательная рассылка
 } msg_destination_t;
 
