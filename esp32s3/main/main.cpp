@@ -10,6 +10,9 @@
 #include "string.h"
 #include "nvs_flash.h"
 
+#include "parallel_bus.hpp"
+#include "ili9486_display.hpp"
+
 static const char* TAG = "vkorobka";
 
 // Настройки Wi-Fi
@@ -19,6 +22,66 @@ static const char* TAG = "vkorobka";
 // Настройки TCP
 #define SERVER_IP   "192.168.43.236"  // IP ПК (сервер), замените на реальный IP ПК из ipconfig
 #define SERVER_PORT 1234              // Порт сервера
+
+// Объекты дисплея
+static Parallel8Bus    lcdBus;
+static Ili9486Display  lcd(lcdBus);
+
+// Цвета для теста: белый, синий, красный, чёрный, голубой (циан)
+static const uint16_t s_test_colors[] = {
+    0xFFFF, // WHITE
+    0x001F, // BLUE
+    0xF800, // RED
+    0x01F0,
+    0x07FF  // CYAN (голубой)
+};
+static constexpr size_t s_test_colors_count =
+    sizeof(s_test_colors) / sizeof(s_test_colors[0]);
+
+// Тестовая задача с двумя режимами:
+// 1) "Медленный" режим — задержка между кадрами, чтобы спокойно видеть цвет.
+// 2) "Максимально быстрый" режим — смена цвета сразу после заливки (минимальная пауза).
+extern "C" void display_test_task(void* pvParameters) {
+    size_t idx = 0;
+
+    while (true) {
+        // РЕЖИМ 1: плавная смена цвета
+        ESP_LOGI(TAG, "LCD: MODE 1 (slow, ~5s)");
+        {
+            TickType_t start = xTaskGetTickCount();
+            const TickType_t duration = pdMS_TO_TICKS(5000); // 5 секунд
+
+            while ((xTaskGetTickCount() - start) < duration) {
+                uint16_t color = s_test_colors[idx];
+                ESP_LOGI(TAG, "LCD[MODE1]: fill idx=%u color=0x%04X",
+                         static_cast<unsigned>(idx), color);
+                lcd.fillScreen(color);
+                idx = (idx + 1) % s_test_colors_count;
+
+                // Доп. пауза, чтобы цвет постоять на экране
+                vTaskDelay(pdMS_TO_TICKS(1000));
+            }
+        }
+
+        // РЕЖИМ 2: максимально быстрая смена цвета
+        ESP_LOGI(TAG, "LCD: MODE 2 (fast, ~5s)");
+        {
+            TickType_t start = xTaskGetTickCount();
+            const TickType_t duration = pdMS_TO_TICKS(5000); // 5 секунд
+
+            while ((xTaskGetTickCount() - start) < duration) {
+                uint16_t color = s_test_colors[idx];
+                ESP_LOGI(TAG, "LCD[MODE2]: fill idx=%u color=0x%04X",
+                         static_cast<unsigned>(idx), color);
+                lcd.fillScreen(color);
+                idx = (idx + 1) % s_test_colors_count;
+
+                // Небольшая пауза только чтобы не мигало слишком агрессивно
+                vTaskDelay(pdMS_TO_TICKS(100));
+            }
+        }
+    }
+}
 
 static EventGroupHandle_t s_wifi_event_group;
 #define WIFI_CONNECTED_BIT BIT0
@@ -172,6 +235,12 @@ extern "C" void app_main(void) {
     ESP_ERROR_CHECK(ret);
     ESP_LOGI(TAG, "NVS initialized successfully");
 
+    // Инициализация дисплея
+    ESP_LOGI(TAG, "LCD: init bus...");
+    ESP_ERROR_CHECK(lcdBus.init());
+    ESP_LOGI(TAG, "LCD: init controller...");
+    lcd.init();
+
     // Инициализация сетевого стека
     ESP_ERROR_CHECK(esp_netif_init());
     ESP_ERROR_CHECK(esp_event_loop_create_default());
@@ -182,5 +251,9 @@ extern "C" void app_main(void) {
     ESP_LOGI(TAG, "vkorobka: Network ready, starting TCP client task...");
 
     xTaskCreate(tcp_client_task, "tcp_client", 4096, NULL, 5, NULL);
+
+    // Тестовая задача заливки дисплея
+    xTaskCreate(display_test_task, "display_test", 4096, NULL, 5, NULL);
+
     ESP_LOGI(TAG, "vkorobka: app_main finished");
 }
