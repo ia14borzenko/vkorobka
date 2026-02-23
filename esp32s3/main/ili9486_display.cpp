@@ -10,26 +10,7 @@
 
 static const char* TAG_LCD = "ILI9486";
 
-#ifndef USE_MANUAL_BUS
 #include "esp_lcd_panel_io.h"
-
-// Тег оставляем, но подробные логи I80_TX по умолчанию отключаем,
-// чтобы не засорять монитор. При необходимости можно будет включить
-// обратно, раскомментировав логи внутри функций.
-static const char* TAG_I80_TX = "I80_TX";
-
-// Вспомогательная функция для логирования tx_param (сейчас делает ничего)
-static void log_tx_param(esp_lcd_panel_io_handle_t /*io*/, uint8_t /*cmd*/,
-                         const uint8_t* /*param*/, size_t /*param_size*/) {
-    // Подробное логирование отключено.
-}
-
-// Вспомогательная функция для логирования tx_color (сейчас делает ничего)
-static void log_tx_color(esp_lcd_panel_io_handle_t /*io*/, uint8_t /*cmd*/,
-                         const void* /*color_data*/, size_t /*color_size*/) {
-    // Подробное логирование отключено.
-}
-#endif
 
 // Массив инициализации по образцу InitCmd[] из LCD_SCREEN.c (MAR3501)
 // Каждая секция: [-1], CMD, далее параметры до следующего -1.
@@ -56,41 +37,6 @@ static const int16_t ili9486_init_cmds[] = {
 void Ili9486Display::init() {
     ESP_LOGI(TAG_LCD, "Display init start");
 
-#ifdef USE_MANUAL_BUS
-    // Ручной режим: используем старый Parallel8Bus
-    bus_.reset();
-    vTaskDelay(pdMS_TO_TICKS(10)); // Небольшая задержка после reset
-
-    const std::size_t n = sizeof(ili9486_init_cmds) / sizeof(ili9486_init_cmds[0]);
-    std::size_t i = 0;
-
-    while (i < n) {
-        int16_t v = ili9486_init_cmds[i++];
-
-        if (v == -1) {
-            if (i >= n) break;
-            v = ili9486_init_cmds[i++];
-        }
-
-        uint8_t cmd = static_cast<uint8_t>(v);
-        bus_.writeCommand(cmd);
-
-        // Параметры до следующего -1 или конца массива
-        while (i < n && ili9486_init_cmds[i] != -1) {
-            uint8_t p = static_cast<uint8_t>(ili9486_init_cmds[i++]);
-            bus_.writeData(p);
-        }
-
-        // Задержки после критических команд
-        if (cmd == 0x11) {           // Sleep Out
-            vTaskDelay(pdMS_TO_TICKS(120));
-        } else if (cmd == 0x29) {    // Display ON
-            vTaskDelay(pdMS_TO_TICKS(20));
-        }
-        // Небольшая задержка после каждой команды для стабильности
-        vTaskDelay(pdMS_TO_TICKS(1));
-    }
-#else
     // Аппаратный I80 режим
     // Инициализируем и дергаем RST ножку отдельно от I80‑шины
     gpio_config_t rst_conf{};
@@ -134,13 +80,8 @@ void Ili9486Display::init() {
             ++i;
         }
 
-        log_tx_param(io_, cmd, param_count ? params : nullptr, param_count);
-        esp_err_t err = esp_lcd_panel_io_tx_param(
-            io_, cmd, param_count ? params : nullptr, param_count);
-        if (err != ESP_OK) {
-            ESP_LOGE(TAG_I80_TX, "TX_PARAM failed: cmd=0x%02X, err=%s", cmd, esp_err_to_name(err));
-        }
-        ESP_ERROR_CHECK(err);
+        ESP_ERROR_CHECK(esp_lcd_panel_io_tx_param(
+            io_, cmd, param_count ? params : nullptr, param_count));
 
         // Задержки после критических команд
         if (cmd == 0x11) {           // Sleep Out
@@ -151,31 +92,12 @@ void Ili9486Display::init() {
         // Небольшая задержка после каждой команды для стабильности
         vTaskDelay(pdMS_TO_TICKS(1));
     }
-#endif
 
     ESP_LOGI(TAG_LCD, "Display init done");
 }
 
 void Ili9486Display::setAddressWindow(uint16_t x0, uint16_t y0,
                                       uint16_t x1, uint16_t y1) {
-#ifdef USE_MANUAL_BUS
-    // CASET (Column / X) - сначала колонки
-    bus_.writeCommand(0x2A);
-    bus_.writeData(static_cast<uint8_t>(x0 >> 8));
-    bus_.writeData(static_cast<uint8_t>(x0 & 0xFF));
-    bus_.writeData(static_cast<uint8_t>(x1 >> 8));
-    bus_.writeData(static_cast<uint8_t>(x1 & 0xFF));
-
-    // PASET (Row / Y) - затем строки
-    bus_.writeCommand(0x2B);
-    bus_.writeData(static_cast<uint8_t>(y0 >> 8));
-    bus_.writeData(static_cast<uint8_t>(y0 & 0xFF));
-    bus_.writeData(static_cast<uint8_t>(y1 >> 8));
-    bus_.writeData(static_cast<uint8_t>(y1 & 0xFF));
-
-    // RAMWR - команда записи в память (CS останется низким для потоковой записи)
-    bus_.beginWriteCommand(0x2C);
-#else
     // CASET (Column / X)
     uint8_t caset[4] = {
         static_cast<uint8_t>(x0 >> 8),
@@ -183,12 +105,7 @@ void Ili9486Display::setAddressWindow(uint16_t x0, uint16_t y0,
         static_cast<uint8_t>(x1 >> 8),
         static_cast<uint8_t>(x1 & 0xFF),
     };
-    log_tx_param(io_, 0x2A, caset, sizeof(caset));
-    esp_err_t err = esp_lcd_panel_io_tx_param(io_, 0x2A, caset, sizeof(caset));
-    if (err != ESP_OK) {
-        ESP_LOGE(TAG_I80_TX, "TX_PARAM failed: cmd=0x2A (CASET), err=%s", esp_err_to_name(err));
-    }
-    ESP_ERROR_CHECK(err);
+    ESP_ERROR_CHECK(esp_lcd_panel_io_tx_param(io_, 0x2A, caset, sizeof(caset)));
 
     // PASET (Row / Y)
     uint8_t paset[4] = {
@@ -197,35 +114,17 @@ void Ili9486Display::setAddressWindow(uint16_t x0, uint16_t y0,
         static_cast<uint8_t>(y1 >> 8),
         static_cast<uint8_t>(y1 & 0xFF),
     };
-    log_tx_param(io_, 0x2B, paset, sizeof(paset));
-    err = esp_lcd_panel_io_tx_param(io_, 0x2B, paset, sizeof(paset));
-    if (err != ESP_OK) {
-        ESP_LOGE(TAG_I80_TX, "TX_PARAM failed: cmd=0x2B (PASET), err=%s", esp_err_to_name(err));
-    }
-    ESP_ERROR_CHECK(err);
-#endif
+    ESP_ERROR_CHECK(esp_lcd_panel_io_tx_param(io_, 0x2B, paset, sizeof(paset)));
 }
 
 void Ili9486Display::writeColor(uint16_t rgb565) {
-#ifdef USE_MANUAL_BUS
-    uint8_t hi = static_cast<uint8_t>(rgb565 >> 8);
-    uint8_t lo = static_cast<uint8_t>(rgb565 & 0xFF);
-    bus_.writeDataStream(hi);
-    bus_.writeDataStream(lo);
-#else
     // Отправка одного пикселя как цвета (используется при необходимости).
     // ВАЖНО: ILI9486 ожидает сначала старший байт, затем младший (big-endian).
     uint8_t buf[2] = {
         static_cast<uint8_t>(rgb565 >> 8),       // HI
         static_cast<uint8_t>(rgb565 & 0xFF)      // LO
     };
-    log_tx_color(io_, 0x2C, buf, sizeof(buf));
-    esp_err_t err = esp_lcd_panel_io_tx_color(io_, 0x2C, buf, sizeof(buf));
-    if (err != ESP_OK) {
-        ESP_LOGE(TAG_I80_TX, "TX_COLOR failed: cmd=0x2C, err=%s", esp_err_to_name(err));
-    }
-    ESP_ERROR_CHECK(err);
-#endif
+    ESP_ERROR_CHECK(esp_lcd_panel_io_tx_color(io_, 0x2C, buf, sizeof(buf)));
 }
 
 void Ili9486Display::fillScreen(uint16_t color) {
@@ -247,28 +146,9 @@ void Ili9486Display::fillRect(uint16_t x, uint16_t y,
 
     setAddressWindow(x, y, x1, y1);
 
-#ifdef USE_MANUAL_BUS
-    // Небольшая задержка после установки окна адресации перед началом записи данных
-    vTaskDelay(pdMS_TO_TICKS(1));
-
-    // Потоковая запись: setAddressWindow уже вызвал beginWriteCommand(0x2C),
-    // так что CS уже низкий и RS уже установлен в HIGH. Просто пишем данные.
-    uint8_t hi = static_cast<uint8_t>(color >> 8);
-    uint8_t lo = static_cast<uint8_t>(color & 0xFF);
-
-    uint32_t total =
-        static_cast<uint32_t>(x1 - x + 1) * (y1 - y + 1);
-    for (uint32_t i = 0; i < total; ++i) {
-        bus_.writeDataStream(hi);
-        bus_.writeDataStream(lo);
-    }
-
-    bus_.endWrite();
-#else
     // Заливка прямоугольника одним цветом, построчно.
     // ILI9486 ожидает порядок байтов: HI, LO для каждого пикселя.
     const uint16_t width_pixels  = static_cast<uint16_t>(x1 - x + 1);
-    const uint16_t height_pixels = static_cast<uint16_t>(y1 - y + 1);
 
     static uint8_t s_line_buf[Ili9486Display::WIDTH * 2]; // максимум по ширине
     for (uint16_t i = 0; i < width_pixels; ++i) {
@@ -277,10 +157,6 @@ void Ili9486Display::fillRect(uint16_t x, uint16_t y,
         s_line_buf[2 * i]     = hi;
         s_line_buf[2 * i + 1] = lo;
     }
-
-    ESP_LOGI(TAG_I80_TX,
-             "TX_COLOR: fillRect start, x=%u y=%u w=%u h=%u",
-             x, y, width_pixels, height_pixels);
 
     for (uint16_t yy = y; yy <= y1; ++yy) {
         // Устанавливаем окно на одну строку и шлём сразу всю линию.
@@ -291,14 +167,51 @@ void Ili9486Display::fillRect(uint16_t x, uint16_t y,
         esp_err_t err = esp_lcd_panel_io_tx_color(io_, 0x2C,
                                                   s_line_buf,
                                                   width_pixels * 2);
-        if (err != ESP_OK) {
-            ESP_LOGE(TAG_I80_TX, "TX_COLOR failed: y=%u, err=%s",
-                     yy, esp_err_to_name(err));
-        }
         ESP_ERROR_CHECK(err);
     }
+}
 
-    ESP_LOGI(TAG_I80_TX, "TX_COLOR: fillRect done");
-#endif
+void Ili9486Display::drawTestPattern() {
+    // Верхняя часть: цветовой градиент по R/G/B
+    const uint16_t grad_height = HEIGHT * 3 / 4; // ~240 строк
+    static uint8_t s_line[Ili9486Display::WIDTH * 2];
+
+    for (uint16_t y = 0; y < grad_height; ++y) {
+        for (uint16_t x = 0; x < WIDTH; ++x) {
+            // r: слева направо 0..31
+            uint8_t r = static_cast<uint8_t>((x * 31) / (WIDTH - 1));
+            // g: сверху вниз 0..63
+            uint8_t g = static_cast<uint8_t>((y * 63) / (grad_height - 1));
+            // b: справа налево 31..0
+            uint8_t b = static_cast<uint8_t>(((WIDTH - 1 - x) * 31) / (WIDTH - 1));
+
+            uint16_t color = (static_cast<uint16_t>(r) << 11) |
+                             (static_cast<uint16_t>(g) << 5)  |
+                             b;
+            s_line[2 * x]     = static_cast<uint8_t>(color >> 8);
+            s_line[2 * x + 1] = static_cast<uint8_t>(color & 0xFF);
+        }
+        setAddressWindow(0, y, WIDTH - 1, y);
+        ESP_ERROR_CHECK(esp_lcd_panel_io_tx_color(io_, 0x2C, s_line, WIDTH * 2));
+    }
+
+    // Нижняя часть: градации серого по горизонтали
+    const uint16_t gray_y0 = grad_height;
+    for (uint16_t y = gray_y0; y < HEIGHT; ++y) {
+        for (uint16_t x = 0; x < WIDTH; ++x) {
+            uint8_t v5  = static_cast<uint8_t>((x * 31) / (WIDTH - 1)); // 0..31
+            uint8_t r   = v5;
+            uint8_t b   = v5;
+            uint8_t g6  = static_cast<uint8_t>((v5 * 2) > 63 ? 63 : (v5 * 2)); // 0..63
+
+            uint16_t color = (static_cast<uint16_t>(r) << 11) |
+                             (static_cast<uint16_t>(g6) << 5) |
+                             b;
+            s_line[2 * x]     = static_cast<uint8_t>(color >> 8);
+            s_line[2 * x + 1] = static_cast<uint8_t>(color & 0xFF);
+        }
+        setAddressWindow(0, y, WIDTH - 1, y);
+        ESP_ERROR_CHECK(esp_lcd_panel_io_tx_color(io_, 0x2C, s_line, WIDTH * 2));
+    }
 }
 
