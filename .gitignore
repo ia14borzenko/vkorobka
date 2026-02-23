@@ -28,3 +28,5 @@ List/
 *.dbgconf
 *.lnp
 /RTE
+.cursor/
+esp32s3/.cache/
