@@ -10,8 +10,24 @@
 #include "string.h"
 #include "nvs_flash.h"
 
-#include "parallel_bus.hpp"
 #include "ili9486_display.hpp"
+
+// Режим отладки дисплея:
+// если определить этот макрос (например, через CMake или просто раскомментировать строку),
+// стек Wi‑Fi и TCP клиент НЕ будут запускаться, останется только работа дисплея.
+#define LCD_DEBUG_NO_NET
+
+// Режим ручного управления шиной (бит-бэнг через Parallel8Bus):
+// если определить этот макрос, будет использоваться старый ручной драйвер вместо аппаратного I80.
+// Это полезно для проверки физического подключения дисплея.
+// #define USE_MANUAL_BUS
+
+#ifdef USE_MANUAL_BUS
+#include "parallel_bus.hpp"
+#else
+#include "esp_lcd_panel_io.h"
+#include "i80_lcd_bus.hpp"
+#endif
 
 static const char* TAG = "vkorobka";
 
@@ -24,8 +40,7 @@ static const char* TAG = "vkorobka";
 #define SERVER_PORT 1234              // Порт сервера
 
 // Объекты дисплея
-static Parallel8Bus    lcdBus;
-static Ili9486Display  lcd(lcdBus);
+static Ili9486Display* s_lcd = nullptr;
 
 // Цвета для теста: белый, синий, красный, чёрный, голубой (циан)
 static const uint16_t s_test_colors[] = {
@@ -38,47 +53,86 @@ static const uint16_t s_test_colors[] = {
 static constexpr size_t s_test_colors_count =
     sizeof(s_test_colors) / sizeof(s_test_colors[0]);
 
-// Тестовая задача с двумя режимами:
-// 1) "Медленный" режим — задержка между кадрами, чтобы спокойно видеть цвет.
-// 2) "Максимально быстрый" режим — смена цвета сразу после заливки (минимальная пауза).
+// Простая консоль для управления дисплеем через UART:
+// Формат команд (вводить в монитор):
+//   R x y w h color_hex   - залить прямоугольник (десятичные x,y,w,h, цвет в hex, например F800)
+//   C color_hex           - залить весь экран цветом
 extern "C" void display_test_task(void* pvParameters) {
-    size_t idx = 0;
+    // Ждём, пока дисплей будет инициализирован
+    while (s_lcd == nullptr) {
+        vTaskDelay(pdMS_TO_TICKS(100));
+    }
+
+    ESP_LOGI(TAG, "LCD CONSOLE: ready. Commands:");
+    ESP_LOGI(TAG, "  R x y w h color_hex   - fill rect");
+    ESP_LOGI(TAG, "  C color_hex           - fill screen");
+    printf("\r\nLCD> ");
+    fflush(stdout);
+
+    char line[64];
+    size_t pos = 0;
 
     while (true) {
-        // РЕЖИМ 1: плавная смена цвета
-        ESP_LOGI(TAG, "LCD: MODE 1 (slow, ~5s)");
-        {
-            TickType_t start = xTaskGetTickCount();
-            const TickType_t duration = pdMS_TO_TICKS(5000); // 5 секунд
-
-            while ((xTaskGetTickCount() - start) < duration) {
-                uint16_t color = s_test_colors[idx];
-                ESP_LOGI(TAG, "LCD[MODE1]: fill idx=%u color=0x%04X",
-                         static_cast<unsigned>(idx), color);
-                lcd.fillScreen(color);
-                idx = (idx + 1) % s_test_colors_count;
-
-                // Доп. пауза, чтобы цвет постоять на экране
-                vTaskDelay(pdMS_TO_TICKS(1000));
-            }
+        int ch = getchar();
+        if (ch == EOF) {
+            vTaskDelay(pdMS_TO_TICKS(50));
+            continue;
         }
 
-        // РЕЖИМ 2: максимально быстрая смена цвета
-        ESP_LOGI(TAG, "LCD: MODE 2 (fast, ~5s)");
-        {
-            TickType_t start = xTaskGetTickCount();
-            const TickType_t duration = pdMS_TO_TICKS(5000); // 5 секунд
+        if (ch == '\r' || ch == '\n') {
+            // Завершаем строку
+            line[pos] = '\0';
 
-            while ((xTaskGetTickCount() - start) < duration) {
-                uint16_t color = s_test_colors[idx];
-                ESP_LOGI(TAG, "LCD[MODE2]: fill idx=%u color=0x%04X",
-                         static_cast<unsigned>(idx), color);
-                lcd.fillScreen(color);
-                idx = (idx + 1) % s_test_colors_count;
+            if (pos > 0) {
+                char cmd = 0;
+                unsigned x = 0, y = 0, w = 0, h = 0;
+                unsigned color = 0;
 
-                // Небольшая пауза только чтобы не мигало слишком агрессивно
-                vTaskDelay(pdMS_TO_TICKS(100));
+                int n = sscanf(line, " %c", &cmd);
+                if (n == 1) {
+                    if (cmd == 'R' || cmd == 'r') {
+                        if (sscanf(line, " %c %u %u %u %u %x",
+                                   &cmd, &x, &y, &w, &h, &color) == 6) {
+                            ESP_LOGI(TAG, "LCD CMD: RECT x=%u y=%u w=%u h=%u color=0x%04X",
+                                     x, y, w, h, (unsigned)(color & 0xFFFF));
+                            if (s_lcd) {
+                                s_lcd->fillRect((uint16_t)x, (uint16_t)y,
+                                                (uint16_t)w, (uint16_t)h,
+                                                (uint16_t)(color & 0xFFFF));
+                            }
+                        } else {
+                            ESP_LOGW(TAG, "LCD CMD: bad RECT, use: R x y w h color_hex");
+                        }
+                    } else if (cmd == 'C' || cmd == 'c') {
+                        if (sscanf(line, " %c %x", &cmd, &color) == 2) {
+                            ESP_LOGI(TAG, "LCD CMD: CLEAR color=0x%04X",
+                                     (unsigned)(color & 0xFFFF));
+                            if (s_lcd) {
+                                s_lcd->fillScreen((uint16_t)(color & 0xFFFF));
+                            }
+                        } else {
+                            ESP_LOGW(TAG, "LCD CMD: bad CLEAR, use: C color_hex");
+                        }
+                    } else {
+                        ESP_LOGW(TAG, "LCD CMD: unknown command '%c'", cmd);
+                    }
+                }
             }
+
+            // Новая строка и приглашение
+            printf("\r\nLCD> ");
+            fflush(stdout);
+            pos = 0;
+        } else if ((ch == '\b' || ch == 127)) {
+            if (pos > 0) {
+                pos--;
+                printf("\b \b");
+                fflush(stdout);
+            }
+        } else if (ch >= 32 && ch <= 126 && pos < sizeof(line) - 1) {
+            line[pos++] = (char)ch;
+            putchar(ch);
+            fflush(stdout);
         }
     }
 }
@@ -235,13 +289,36 @@ extern "C" void app_main(void) {
     ESP_ERROR_CHECK(ret);
     ESP_LOGI(TAG, "NVS initialized successfully");
 
-    // Инициализация дисплея
-    ESP_LOGI(TAG, "LCD: init bus...");
+    // Инициализация дисплея (ручной или аппаратный режим)
+#ifdef USE_MANUAL_BUS
+    ESP_LOGI(TAG, "LCD: Using MANUAL bus (Parallel8Bus bit-bang)");
+    static Parallel8Bus lcdBus;
     ESP_ERROR_CHECK(lcdBus.init());
+    static Ili9486Display lcd(lcdBus);
+    s_lcd = &lcd;
+    ESP_LOGI(TAG, "LCD: init controller...");
+    lcd.init();
+#else
+    ESP_LOGI(TAG, "LCD: Using HARDWARE I80 bus");
+    ESP_LOGI(TAG, "LCD: init I80 bus + IO...");
+    esp_lcd_panel_io_handle_t io_handle = init_ili9486_i80_panel_io();
+
+    // Пробуем прочитать несколько регистров до инициализации контроллера
+    ESP_LOGI(TAG, "LCD: debug-read registers BEFORE init...");
+    i80_lcd_debug_read_id();
+
+    static Ili9486Display lcd(io_handle);
+    s_lcd = &lcd;
     ESP_LOGI(TAG, "LCD: init controller...");
     lcd.init();
 
-    // Инициализация сетевого стека
+    // И ещё раз после инициализации, чтобы увидеть, изменились ли значения
+    ESP_LOGI(TAG, "LCD: debug-read registers AFTER init...");
+    i80_lcd_debug_read_id();
+#endif
+
+    // Инициализация сетевого стека (может быть отключена в режиме отладки дисплея)
+#ifndef LCD_DEBUG_NO_NET
     ESP_ERROR_CHECK(esp_netif_init());
     ESP_ERROR_CHECK(esp_event_loop_create_default());
     esp_netif_t *sta_netif = esp_netif_create_default_wifi_sta();
@@ -251,6 +328,9 @@ extern "C" void app_main(void) {
     ESP_LOGI(TAG, "vkorobka: Network ready, starting TCP client task...");
 
     xTaskCreate(tcp_client_task, "tcp_client", 4096, NULL, 5, NULL);
+#else
+    ESP_LOGW(TAG, "LCD DEBUG MODE: Wi-Fi/TCP stack NOT started (LCD_DEBUG_NO_NET)");
+#endif
 
     // Тестовая задача заливки дисплея
     xTaskCreate(display_test_task, "display_test", 4096, NULL, 5, NULL);
