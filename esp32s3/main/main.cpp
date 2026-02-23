@@ -1,13 +1,11 @@
-#include <stdio.h>  // Для fgets
+#include <stdio.h>
+#include <string.h>
+#include <stdlib.h>
+
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
 #include "esp_log.h"
-#include "esp_system.h"
-#include "esp_event.h"
 #include "esp_netif.h"
-#include "esp_wifi.h"
-#include "lwip/sockets.h"
-#include "string.h"
 #include "nvs_flash.h"
 
 #include "ili9486_display.hpp"
@@ -20,147 +18,450 @@
 #include "esp_lcd_panel_io.h"
 #include "i80_lcd_bus.hpp"
 
+#include "netpack.h"
+#include "wifi.hpp"
+#include "tcp.hpp"
+#include "message_bridge.hpp"
+#include "uart_bridge.hpp"
+#include "message_protocol.h"
+
 static const char* TAG = "vkorobka";
 
 // Настройки Wi-Fi
-#define WIFI_SSID "ModelSim"  // Замените на SSID хотспота телефона
-#define WIFI_PASS "adminadmin"  // Замените на пароль
+#define WIFI_SSID "ModelSim"
+#define WIFI_PASS "adminadmin"
 
 // Настройки TCP
-#define SERVER_IP   "192.168.43.236"  // IP ПК (сервер), замените на реальный IP ПК из ipconfig
-#define SERVER_PORT 1234              // Порт сервера
+#define SERVER_IP   "192.168.43.236"
+#define SERVER_PORT 1234
 
 // Объекты дисплея
 static Ili9486Display* s_lcd = nullptr;
 
 // Нет отдельной задачи отображения — тестовый паттерн рисуется один раз из app_main.
 
-static EventGroupHandle_t s_wifi_event_group;
-#define WIFI_CONNECTED_BIT BIT0
+// Глобальные сетевые объекты
+static wifi_t* g_wifi = nullptr;
+static tcp_t* g_tcp = nullptr;
+message_bridge_t* g_message_bridge = nullptr;  // Убрано static для доступа из tcp.cpp
+static uart_bridge_t* g_uart_bridge = nullptr;
 
-// Обработчик событий Wi-Fi
-static void wifi_event_handler(void* arg, esp_event_base_t event_base,
-                               int32_t event_id, void* event_data) {
-    if (event_base == WIFI_EVENT && event_id == WIFI_EVENT_STA_START) {
-        esp_wifi_connect();
-    } else if (event_base == WIFI_EVENT && event_id == WIFI_EVENT_STA_DISCONNECTED) {
-        wifi_event_sta_disconnected_t* disconnected = (wifi_event_sta_disconnected_t*) event_data;
-        ESP_LOGE(TAG, "Disconnected! Reason: %d (%s)", disconnected->reason,
-                 esp_err_to_name(disconnected->reason));  // Логирование причины
-
-        esp_wifi_connect();  // retry
-    } else if (event_base == IP_EVENT && event_id == IP_EVENT_STA_GOT_IP) {
-        xEventGroupSetBits(s_wifi_event_group, WIFI_CONNECTED_BIT);
-        ip_event_got_ip_t* event = (ip_event_got_ip_t*) event_data;
-        ESP_LOGI(TAG, "Got IP: " IPSTR, IP2STR(&event->ip_info.ip));
+// Обработчик новых сообщений через message_bridge
+static void handle_new_message(const msg_header_t* header, const u8* payload, u32 payload_len)
+{
+    if (header == nullptr)
+    {
+        return;
     }
-}
-
-static void wifi_init_sta(void) {
-    s_wifi_event_group = xEventGroupCreate();
-
-    wifi_init_config_t cfg = WIFI_INIT_CONFIG_DEFAULT();
-    esp_wifi_init(&cfg);
-
-    esp_event_handler_instance_t instance_any_id;
-    esp_event_handler_instance_t instance_got_ip;
-    esp_event_handler_instance_register(WIFI_EVENT, ESP_EVENT_ANY_ID, &wifi_event_handler, NULL, &instance_any_id);
-    esp_event_handler_instance_register(IP_EVENT, IP_EVENT_STA_GOT_IP, &wifi_event_handler, NULL, &instance_got_ip);
-
-    wifi_config_t wifi_config = {};
-    strcpy((char*)wifi_config.sta.ssid, WIFI_SSID);
-    strcpy((char*)wifi_config.sta.password, WIFI_PASS);
-    wifi_config.sta.threshold.authmode = WIFI_AUTH_WPA2_PSK;  // Принудительно WPA2
-
-    esp_wifi_set_mode(WIFI_MODE_STA);
-    esp_wifi_set_config(WIFI_IF_STA, &wifi_config);
-    esp_wifi_start();
-
-    ESP_LOGI(TAG, "Wi-Fi init done, waiting for connection...");
-    xEventGroupWaitBits(s_wifi_event_group, WIFI_CONNECTED_BIT, pdFALSE, pdTRUE, portMAX_DELAY);
-}
-
-// Задача приема сообщений
-static void tcp_rx_task(void* pvParameters) {
-    int sock = *(int*)pvParameters;
-    char rx_buffer[256];
-
-    while (1) {
-        int len = recv(sock, rx_buffer, sizeof(rx_buffer) - 1, 0);
-        if (len < 0) {
-            ESP_LOGE(TAG, "Recv failed: errno %d", errno);
-            break;
-        } else if (len == 0) {
-            ESP_LOGI(TAG, "Connection closed");
-            break;
-        } else {
-            rx_buffer[len] = 0;
-            ESP_LOGI(TAG, "PC: %s", rx_buffer);
+    
+    ESP_LOGI(TAG, "[RX] New protocol message: type=%d, src=%d, dst=%d, len=%u",
+             header->msg_type, header->source_id, header->destination_id, header->payload_len);
+    
+    // Обработка команд TEST и STATUS от win-x64
+    if (header->source_id == MSG_SRC_WIN && header->destination_id == MSG_DST_ESP32 && 
+        header->msg_type == MSG_TYPE_COMMAND && payload && payload_len > 0)
+    {
+        // Создаем временную строку для сравнения
+        char* str_buf = (char*)malloc(payload_len + 1);
+        if (str_buf) {
+            memcpy(str_buf, payload, payload_len);
+            str_buf[payload_len] = '\0';
+            
+            // Обработка команды TEST
+            if (strcmp(str_buf, "TEST") == 0) {
+                ESP_LOGI(TAG, "Received TEST command, sending response");
+                free(str_buf);
+                
+                // Отправляем ответ через новый протокол
+                const char* response = "TEST_RESPONSE";
+                msg_header_t response_header = msg_create_header(
+                    MSG_TYPE_RESPONSE,
+                    MSG_SRC_ESP32,
+                    MSG_DST_WIN,
+                    128,
+                    0,
+                    strlen(response),
+                    0,
+                    MSG_ROUTE_NONE
+                );
+                
+                if (g_message_bridge && g_message_bridge->send_message(response_header, 
+                                                                        reinterpret_cast<const u8*>(response), 
+                                                                        strlen(response)))
+                {
+                    ESP_LOGI(TAG, "Test response sent successfully via new protocol");
+                }
+                else
+                {
+                    ESP_LOGE(TAG, "Failed to send test response via new protocol");
+                }
+                return;
+            }
+            
+            // Обработка команды STATUS
+            if (strcmp(str_buf, "STATUS") == 0) {
+                ESP_LOGI(TAG, "Received STATUS command, sending status");
+                free(str_buf);
+                
+                // Формируем строку статуса: STATUS:WIFI=<state>:<connected>,TCP=<state>:<connected>
+                char status_buf[256];
+                const char* wifi_state_str = "UNKNOWN";
+                bool wifi_connected = false;
+                const char* tcp_state_str = "UNKNOWN";
+                bool tcp_connected = false;
+                
+                if (g_wifi) {
+                    wifi_connected = g_wifi->is_connected();
+                    // На ESP32 WiFi не имеет состояний как на win-x64, только подключен/не подключен
+                    wifi_state_str = wifi_connected ? "CONNECTED" : "DISCONNECTED";
+                }
+                
+                if (g_tcp) {
+                    tcp_state_t tcp_state = g_tcp->get_state();
+                    tcp_connected = g_tcp->is_connected();
+                    
+                    // На ESP32 tcp_state_t - это enum, а не enum class
+                    switch (tcp_state) {
+                        case TCP_STATE_INIT: tcp_state_str = "INIT"; break;
+                        case TCP_STATE_CONNECTING: tcp_state_str = "CONNECTING"; break;
+                        case TCP_STATE_CONNECTED: tcp_state_str = "CONNECTED"; break;
+                        case TCP_STATE_LOST: tcp_state_str = "LOST"; break;
+                        case TCP_STATE_RETRY: tcp_state_str = "RETRY"; break;
+                        default: tcp_state_str = "UNKNOWN"; break;
+                    }
+                }
+                
+                int status_len = snprintf(status_buf, sizeof(status_buf),
+                            "STATUS:WIFI=%s:%d,TCP=%s:%d",
+                            wifi_state_str, wifi_connected ? 1 : 0,
+                            tcp_state_str, tcp_connected ? 1 : 0);
+                
+                if (status_len > 0 && status_len < (int)sizeof(status_buf)) {
+                    // Отправляем ответ через новый протокол
+                    msg_header_t response_header = msg_create_header(
+                        MSG_TYPE_RESPONSE,
+                        MSG_SRC_ESP32,
+                        MSG_DST_WIN,
+                        128,
+                        0,
+                        status_len,
+                        0,
+                        MSG_ROUTE_NONE
+                    );
+                    
+                    if (g_message_bridge && g_message_bridge->send_message(response_header, 
+                                                                            reinterpret_cast<const u8*>(status_buf), 
+                                                                            status_len))
+                    {
+                        ESP_LOGI(TAG, "Status response sent successfully via new protocol");
+                    }
+                    else
+                    {
+                        ESP_LOGE(TAG, "Failed to send status response via new protocol");
+                    }
+                }
+                return;
+            }
+            
+            free(str_buf);
         }
     }
-    vTaskDelete(NULL);
+    
+    // Обработка тестовых сообщений с изображениями для ESP32
+    if (header->destination_id == MSG_DST_ESP32 && header->msg_type == MSG_TYPE_DATA && payload && payload_len > 0)
+    {
+        ESP_LOGI(TAG, "[ESP32] Processing image test for ESP32 component");
+        
+        // Временное решение: возвращаем исходное изображение без изменений
+        // Простое переворачивание байтов портит JPG формат
+        // В реальной реализации здесь должна быть декомпрессия JPG, отзеркаливание и рекомпрессия
+        std::vector<u8> mirrored_payload(payload, payload + payload_len);
+        
+        ESP_LOGI(TAG, "[ESP32] Image returned (original, not mirrored): %u bytes", payload_len);
+        
+        // Формируем ответ
+        msg_header_t response_header = msg_create_header(
+            MSG_TYPE_RESPONSE,
+            MSG_SRC_ESP32,
+            MSG_DST_EXTERNAL,
+            128,
+            0,
+            payload_len,
+            0,
+            MSG_ROUTE_NONE
+        );
+        
+        // Отправляем ответ обратно через TCP используя message_bridge
+        if (g_message_bridge)
+        {
+            if (g_message_bridge->send_message(response_header, mirrored_payload.data(), payload_len))
+            {
+                ESP_LOGI(TAG, "[ESP32] Response sent to Windows via message_bridge");
+            }
+            else
+            {
+                ESP_LOGE(TAG, "[ESP32] Failed to send response via message_bridge");
+            }
+        }
+        else
+        {
+            ESP_LOGW(TAG, "[ESP32] message_bridge not available, cannot send response");
+        }
+    }
 }
 
-static void tcp_client_task(void* pvParameters) {
-    ESP_LOGI(TAG, "Starting TCP client...");
-
-    int sock = socket(AF_INET, SOCK_STREAM, IPPROTO_IP);
-    if (sock < 0) {
-        ESP_LOGE(TAG, "Unable to create socket: errno %d", errno);
-        vTaskDelete(NULL);
-        return;
+// Обработчик принятых пакетов (старый формат - больше не используется)
+static void handle_packet(cmdcode_t cmd_code, const char* payload, u32 payload_len) {
+    // Старый CMD протокол больше не используется
+    // Все сообщения должны приходить через новый протокол
+    ESP_LOGW(TAG, "[RX] Legacy CMD packet received (ignored): CMD=0x%04x, len=%u", cmd_code, payload_len);
+    ESP_LOGW(TAG, "Note: All communication should use the new message_protocol");
+    
+    // Пытаемся обработать как новый протокол (fallback)
+    if (g_message_bridge && payload_len >= MSG_HEADER_LEN)
+    {
+        const u8* buffer = reinterpret_cast<const u8*>(payload);
+        if (g_message_bridge->process_buffer(buffer, payload_len, true))
+        {
+            // Успешно обработано как новое сообщение
+            return;
+        }
     }
-
-    struct sockaddr_in dest_addr;
-    dest_addr.sin_addr.s_addr = inet_addr(SERVER_IP);
-    dest_addr.sin_family = AF_INET;
-    dest_addr.sin_port = htons(SERVER_PORT);
-
-    ESP_LOGI(TAG, "Connecting to %s:%d...", SERVER_IP, SERVER_PORT);
-    int err = connect(sock, (struct sockaddr*)&dest_addr, sizeof(dest_addr));
-    if (err != 0) {
-        ESP_LOGE(TAG, "Socket connect failed: errno %d", errno);
-        close(sock);
-        vTaskDelete(NULL);
-        return;
+    
+    // Старая обработка команд больше не используется
+    if (false && cmd_code == CMD_WIN && payload_len > 0 && payload != nullptr) {
+        // Создаем временную строку для сравнения
+        char* str_buf = (char*)malloc(payload_len + 1);
+        if (str_buf) {
+            memcpy(str_buf, payload, payload_len);
+            str_buf[payload_len] = '\0';
+            
+            // Обработка команды TEST
+            if (strcmp(str_buf, "TEST") == 0) {
+                ESP_LOGI(TAG, "Received TEST command, sending response");
+                if (g_tcp && g_tcp->is_connected()) {
+                    if (g_tcp->send_packet_str(CMD_ESP, "TEST_RESPONSE")) {
+                        ESP_LOGI(TAG, "Test response sent successfully");
+                    } else {
+                        ESP_LOGE(TAG, "Failed to send test response");
+                    }
+                } else {
+                    ESP_LOGW(TAG, "TCP not connected, cannot send test response");
+                }
+                free(str_buf);
+                return;
+            }
+            
+            // Обработка команды STATUS
+            if (strcmp(str_buf, "STATUS") == 0) {
+                ESP_LOGI(TAG, "Received STATUS command, sending status");
+                if (g_tcp && g_tcp->is_connected()) {
+                    // Формируем строку статуса: STATUS:WIFI=<state>:<connected>,TCP=<state>:<connected>
+                    char status_buf[256];
+                    const char* wifi_state_str = "UNKNOWN";
+                    int wifi_connected = 0;
+                    
+                    if (g_wifi) {
+                        wifi_connected = g_wifi->is_connected() ? 1 : 0;
+                        // WiFi на ESP32 не имеет состояний как на win-x64, только подключен/не подключен
+                        wifi_state_str = wifi_connected ? "CONNECTED" : "DISCONNECTED";
+                    }
+                    
+                    const char* tcp_state_str = "UNKNOWN";
+                    int tcp_connected = 0;
+                    
+                    if (g_tcp) {
+                        tcp_state_str = g_tcp->get_state_string();
+                        tcp_connected = g_tcp->is_connected() ? 1 : 0;
+                    }
+                    
+                    snprintf(status_buf, sizeof(status_buf), 
+                            "STATUS:WIFI=%s:%d,TCP=%s:%d",
+                            wifi_state_str, wifi_connected,
+                            tcp_state_str, tcp_connected);
+                    
+                    if (g_tcp->send_packet_str(CMD_ESP, status_buf)) {
+                        ESP_LOGI(TAG, "Status sent successfully: %s", status_buf);
+                    } else {
+                        ESP_LOGE(TAG, "Failed to send status");
+                    }
+                } else {
+                    ESP_LOGW(TAG, "TCP not connected, cannot send status");
+                }
+                free(str_buf);
+                return;
+            }
+            
+            // Обычный вывод для других команд
+            ESP_LOGI(TAG, "PC: %s", str_buf);
+            free(str_buf);
+        }
     }
+    
+    // Обычный вывод для других типов пакетов
+    if (payload_len > 0 && payload != nullptr) {
+        // Создаем временную строку для вывода
+        char* str_buf = (char*)malloc(payload_len + 1);
+        if (str_buf) {
+            memcpy(str_buf, payload, payload_len);
+            str_buf[payload_len] = '\0';
+            ESP_LOGI(TAG, "PC: %s", str_buf);
+            free(str_buf);
+        }
+    }
+    
+    switch (cmd_code) {
+        case CMD_WIN:
+            ESP_LOGI(TAG, "  Type: Windows command");
+            break;
+        case CMD_ESP:
+            ESP_LOGI(TAG, "  Type: ESP32 command");
+            break;
+        case CMD_STM:
+            ESP_LOGI(TAG, "  Type: STM32 command");
+            break;
+        case CMD_DPL:
+            ESP_LOGI(TAG, "  Type: Display data");
+            break;
+        case CMD_MIC:
+            ESP_LOGI(TAG, "  Type: Microphone data");
+            break;
+        case CMD_SPK:
+            ESP_LOGI(TAG, "  Type: Speaker data");
+            break;
+        default:
+            ESP_LOGW(TAG, "  Type: Unknown");
+            break;
+    }
+}
 
-    ESP_LOGI(TAG, "Connected successfully! Starting RX task...");
-
-    // Запускаем приём в отдельной задаче
-    xTaskCreate(tcp_rx_task, "tcp_rx", 4096, &sock, 5, NULL);
-
-    // Отправка сообщений с нормальным редактированием
+// Задача для чтения консольного ввода и отправки сообщений
+static void console_input_task(void* pvParameters) {
     char payload[256];
     int pos = 0;
-
+    
+    // Ждем, пока TCP будет инициализирован
+    while (g_tcp == nullptr) {
+        vTaskDelay(pdMS_TO_TICKS(100));
+    }
+    
+    ESP_LOGI(TAG, "Console input task ready");
     printf("Type message and press Enter to send:\r\n");
-
+    printf("  Format: <data> - send raw data\r\n");
+    printf("  Format: send <code> <data> - send CMD packet (code: 0x41 or 65)\r\n");
+    fflush(stdout);
+    
     while (1) {
+        // Используем fread для неблокирующего чтения
         int ch = getchar();
-
-        if (ch == EOF) {
-            vTaskDelay(pdMS_TO_TICKS(100));
+        
+        if (ch == EOF || ch == -1) {
+            vTaskDelay(pdMS_TO_TICKS(50));
             continue;
         }
-
+        
         if (ch == '\n' || ch == '\r') {
             if (pos > 0) {
                 payload[pos] = '\0';
-                int len = send(sock, payload, pos, 0);
-                if (len < 0) {
-                    ESP_LOGE(TAG, "Send failed: errno %d", errno);
-                    break;
+                
+                if (g_tcp && g_tcp->is_connected()) {
+                    // Обработка команды status
+                    if (strcmp(payload, "status") == 0) {
+                        ESP_LOGI(TAG, "=== Status Information ===");
+                        
+                        // WiFi Status
+                        ESP_LOGI(TAG, "WiFi:");
+                        if (g_wifi) {
+                            bool wifi_connected = g_wifi->is_connected();
+                            ESP_LOGI(TAG, "  Connected: %s", wifi_connected ? "YES" : "NO");
+                        } else {
+                            ESP_LOGE(TAG, "  Status: NOT INITIALIZED");
+                        }
+                        
+                        // TCP Status
+                        ESP_LOGI(TAG, "TCP:");
+                        if (g_tcp) {
+                            const char* tcp_state_str = g_tcp->get_state_string();
+                            bool tcp_connected = g_tcp->is_connected();
+                            ESP_LOGI(TAG, "  State: %s", tcp_state_str);
+                            ESP_LOGI(TAG, "  Connected: %s", tcp_connected ? "YES" : "NO");
+                        } else {
+                            ESP_LOGE(TAG, "  Status: NOT INITIALIZED");
+                        }
+                        
+                        printf("\r\n");
+                        pos = 0;
+                        continue;
+                    }
+                    
+                    // Проверяем, является ли это командой send с кодом
+                    // Формат: "send <code> <data>" или просто "<data>"
+                    if (strncmp(payload, "send ", 5) == 0) {
+                        // Парсим команду send
+                        char* cmd_ptr = payload + 5;  // Пропускаем "send "
+                        
+                        // Пытаемся найти код команды (может быть hex 0x41 или decimal 65)
+                        cmdcode_t cmd_code = CMD_RESERVED;
+                        char* code_end = NULL;
+                        
+                        // Пробуем распарсить как hex (0x...)
+                        if (cmd_ptr[0] == '0' && (cmd_ptr[1] == 'x' || cmd_ptr[1] == 'X')) {
+                            cmd_code = (cmdcode_t)strtoul(cmd_ptr, &code_end, 16);
+                        } else {
+                            // Пробуем распарсить как decimal
+                            cmd_code = (cmdcode_t)strtoul(cmd_ptr, &code_end, 10);
+                        }
+                        
+                        // Если удалось распарсить код и есть данные после него
+                        if (code_end != NULL && code_end != cmd_ptr && *code_end == ' ' && cmd_code != CMD_RESERVED) {
+                            // Пропускаем пробел и берем данные
+                            char* data_ptr = code_end + 1;
+                            // Вычисляем длину данных как разницу между концом буфера и началом данных
+                            // Используем pos (фактическая длина) вместо strlen() для корректной обработки нулевых байт
+                            int data_start_offset = (int)(data_ptr - payload);
+                            int data_len = pos - data_start_offset;
+                            
+                            if (data_len > 0) {
+                                // Отправляем в формате CMD
+                                if (g_tcp->send_packet(cmd_code, data_ptr, data_len)) {
+                                    ESP_LOGI(TAG, "Sent packet: CMD=0x%04x, Data length=%d bytes", cmd_code, data_len);
+                                } else {
+                                    ESP_LOGE(TAG, "Failed to send packet");
+                                }
+                            } else {
+                                ESP_LOGW(TAG, "No data to send. Usage: send <code> <data>");
+                            }
+                        } else {
+                            // Если не удалось распарсить код, отправляем как raw данные
+                            // Используем фактическую длину от cmd_ptr до конца буфера
+                            int cmd_start_offset = (int)(cmd_ptr - payload);
+                            int cmd_data_len = pos - cmd_start_offset;
+                            if (cmd_data_len > 0 && g_tcp->send(cmd_ptr, cmd_data_len)) {
+                                ESP_LOGI(TAG, "Sent %d bytes (raw)", cmd_data_len);
+                            } else {
+                                ESP_LOGE(TAG, "Failed to send message");
+                            }
+                        }
+                    } else {
+                        // Отправляем как raw данные (как было в оригинале)
+                        if (g_tcp->send(payload, pos)) {
+                            ESP_LOGI(TAG, "Sent %d bytes: %s", pos, payload);
+                        } else {
+                            ESP_LOGE(TAG, "Failed to send message");
+                        }
+                    }
+                } else {
+                    ESP_LOGW(TAG, "Not connected, cannot send message");
                 }
-                ESP_LOGI(TAG, "Sent %d bytes: %s", len, payload);
-                printf("\r\n");           // новая строка после отправки
+                
+                printf("\r\n");
                 pos = 0;
             }
         }
         else if (ch == '\b' || ch == 127) {
             if (pos > 0) {
                 pos--;
-                printf("\b \b");          // стираем символ визуально
+                printf("\b \b");
                 fflush(stdout);
             }
         }
@@ -170,14 +471,12 @@ static void tcp_client_task(void* pvParameters) {
             fflush(stdout);
         }
     }
-
-    close(sock);
-    vTaskDelete(NULL);
 }
 
 extern "C" void app_main(void) {
     ESP_LOGI(TAG, "vkorobka: App starting...");
-
+    
+    // Инициализация NVS
     esp_err_t ret = nvs_flash_init();
     if (ret == ESP_ERR_NVS_NO_FREE_PAGES || ret == ESP_ERR_NVS_NEW_VERSION_FOUND) {
         ESP_LOGW(TAG, "NVS partition needs erasing... ret = 0x%x", ret);
@@ -211,20 +510,77 @@ extern "C" void app_main(void) {
 
     // Инициализация сетевого стека (может быть отключена в режиме отладки дисплея)
 #ifndef LCD_DEBUG_NO_NET
+    // Инициализация сетевого стека
     ESP_ERROR_CHECK(esp_netif_init());
     ESP_ERROR_CHECK(esp_event_loop_create_default());
     esp_netif_t *sta_netif = esp_netif_create_default_wifi_sta();
     assert(sta_netif);
+    
+    // Инициализация Wi-Fi
+    g_wifi = new wifi_t();
+    if (!g_wifi->init(WIFI_SSID, WIFI_PASS)) {
+        ESP_LOGE(TAG, "WiFi initialization failed");
+        return;
+    }
+    g_wifi->wait_for_connection();
+    ESP_LOGI(TAG, "Wi-Fi connected");
+    
+    // Инициализация UART bridge
+    g_uart_bridge = new uart_bridge_t(UART_NUM_2, 115200);
+    if (!g_uart_bridge->init(17, 16))  // TX=17, RX=16 (настройте под вашу плату)
+    {
+        ESP_LOGE(TAG, "UART bridge initialization failed");
+        return;
+    }
+    if (!g_uart_bridge->start())
+    {
+        ESP_LOGE(TAG, "UART bridge start failed");
+        return;
+    }
+    ESP_LOGI(TAG, "UART bridge started");
 
-    wifi_init_sta();
-    ESP_LOGI(TAG, "vkorobka: Network ready, starting TCP client task...");
-
-    xTaskCreate(tcp_client_task, "tcp_client", 4096, NULL, 5, NULL);
+    // Инициализация message bridge
+    g_message_bridge = new message_bridge_t();
+    g_message_bridge->init(nullptr, g_uart_bridge);  // TCP будет установлен позже
+    g_message_bridge->register_handler(MSG_TYPE_COMMAND, handle_new_message);
+    g_message_bridge->register_handler(MSG_TYPE_DATA, handle_new_message);
+    g_message_bridge->register_handler(MSG_TYPE_STREAM, handle_new_message);
+    
+    // Устанавливаем callback для UART
+    g_uart_bridge->set_message_callback([](const msg_header_t* header, const u8* payload, u32 payload_len) {
+        if (g_message_bridge)
+        {
+            g_message_bridge->route_from_uart(header, payload, payload_len);
+        }
+    });
+    
+    // Инициализация TCP
+    g_tcp = new tcp_t(SERVER_IP, SERVER_PORT, g_wifi);
+    g_tcp->set_packet_callback(handle_packet);
+    
+    // Устанавливаем TCP в message_bridge
+    g_message_bridge->init(g_tcp, g_uart_bridge);
+    
+    if (!g_tcp->start()) {
+        ESP_LOGE(TAG, "TCP client start failed");
+        return;
+    }
+    ESP_LOGI(TAG, "TCP client started");
+    
+    // Запускаем задачу для чтения консольного ввода
+    xTaskCreate(console_input_task, "console_input", 4096, NULL, 5, NULL);
+    ESP_LOGI(TAG, "Console input task created");
+    
+    // Основной цикл
+    while (1) {
+        vTaskDelay(pdMS_TO_TICKS(1000));
+    }
 #else
     ESP_LOGW(TAG, "LCD DEBUG MODE: Wi-Fi/TCP stack NOT started (LCD_DEBUG_NO_NET)");
+    // В режиме отладки дисплея просто остаёмся в бесконечном цикле,
+    // чтобы задача app_main не завершилась сразу.
+    while (1) {
+        vTaskDelay(pdMS_TO_TICKS(1000));
+    }
 #endif
-
-    // Дополнительные задачи пока не создаём — на экране статический тестовый паттерн.
-
-    ESP_LOGI(TAG, "vkorobka: app_main finished");
 }

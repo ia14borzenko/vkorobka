@@ -5,6 +5,7 @@ CMakeCache.txt
 CMakeFiles/
 
 # vs
+.cursor/
 .vs/
 bin/
 obj/
@@ -30,3 +31,7 @@ List/
 /RTE
 .cursor/
 esp32s3/.cache/
+
+*.scvd
+*.iex
+*.idx

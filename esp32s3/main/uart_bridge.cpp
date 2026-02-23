@@ -1,0 +1,425 @@
+#include "uart_bridge.hpp"
+#include "esp_log.h"
+#include <string.h>
+
+static const char* TAG = "uart_bridge";
+
+uart_bridge_t::uart_bridge_t(uart_port_t uart_num, int baud_rate)
+    : uart_num_(uart_num)
+    , baud_rate_(baud_rate)
+    , initialized_(false)
+    , rx_callback_(nullptr)
+    , rx_task_handle_(nullptr)
+    , tx_task_handle_(nullptr)
+    , tx_queue_(nullptr)
+    , uart_event_queue_(nullptr)
+{
+}
+
+uart_bridge_t::~uart_bridge_t()
+{
+    stop();
+}
+
+bool uart_bridge_t::init(int tx_pin, int rx_pin)
+{
+    if (initialized_)
+    {
+        ESP_LOGW(TAG, "UART already initialized");
+        return true;
+    }
+
+    // Конфигурация UART
+    uart_config_t uart_config = {
+        .baud_rate = baud_rate_,
+        .data_bits = UART_DATA_8_BITS,
+        .parity = UART_PARITY_DISABLE,
+        .stop_bits = UART_STOP_BITS_1,
+        .flow_ctrl = UART_HW_FLOWCTRL_DISABLE,
+        .source_clk = UART_SCLK_DEFAULT,
+    };
+
+    // Создаем очередь событий UART перед установкой драйвера
+    uart_event_queue_ = xQueueCreate(10, sizeof(uart_event_t));
+    if (uart_event_queue_ == NULL)
+    {
+        ESP_LOGE(TAG, "Failed to create UART event queue");
+        return false;
+    }
+
+    // Устанавливаем конфигурацию с очередью событий
+    esp_err_t ret = uart_driver_install(uart_num_, UART_RX_BUF_SIZE, UART_TX_BUF_SIZE, 
+                                        10, &uart_event_queue_, 0);
+    if (ret != ESP_OK)
+    {
+        ESP_LOGE(TAG, "Failed to install UART driver: %s", esp_err_to_name(ret));
+        vQueueDelete(uart_event_queue_);
+        uart_event_queue_ = nullptr;
+        return false;
+    }
+
+    ret = uart_param_config(uart_num_, &uart_config);
+    if (ret != ESP_OK)
+    {
+        ESP_LOGE(TAG, "Failed to configure UART: %s", esp_err_to_name(ret));
+        uart_driver_delete(uart_num_);
+        vQueueDelete(uart_event_queue_);
+        uart_event_queue_ = nullptr;
+        return false;
+    }
+
+    ret = uart_set_pin(uart_num_, tx_pin, rx_pin, UART_PIN_NO_CHANGE, UART_PIN_NO_CHANGE);
+    if (ret != ESP_OK)
+    {
+        ESP_LOGE(TAG, "Failed to set UART pins: %s", esp_err_to_name(ret));
+        uart_driver_delete(uart_num_);
+        vQueueDelete(uart_event_queue_);
+        uart_event_queue_ = nullptr;
+        return false;
+    }
+
+    // Создаем очередь для отправки
+    tx_queue_ = xQueueCreate(UART_QUEUE_SIZE, sizeof(std::vector<u8>*));
+    if (tx_queue_ == NULL)
+    {
+        ESP_LOGE(TAG, "Failed to create TX queue");
+        uart_driver_delete(uart_num_);
+        vQueueDelete(uart_event_queue_);
+        uart_event_queue_ = nullptr;
+        return false;
+    }
+
+    initialized_ = true;
+    ESP_LOGI(TAG, "UART initialized on port %d, baud rate %d (with event queue)", uart_num_, baud_rate_);
+    return true;
+}
+
+bool uart_bridge_t::start()
+{
+    if (!initialized_)
+    {
+        ESP_LOGE(TAG, "UART not initialized");
+        return false;
+    }
+
+    // Создаем задачу для чтения
+    // Увеличиваем размер стека для обработки больших сообщений (до 4KB payload)
+    // 8192 байт должно быть достаточно для обработки больших сообщений и глубоких вызовов callback
+    BaseType_t ret = xTaskCreate(uart_rx_task, "uart_rx", 8192, this, 5, &rx_task_handle_);
+    if (ret != pdPASS)
+    {
+        ESP_LOGE(TAG, "Failed to create RX task");
+        return false;
+    }
+
+    // Создаем задачу для записи (увеличиваем стек из-за отладочного вывода)
+    ret = xTaskCreate(uart_tx_task, "uart_tx", 4096, this, 5, &tx_task_handle_);
+    if (ret != pdPASS)
+    {
+        ESP_LOGE(TAG, "Failed to create TX task");
+        vTaskDelete(rx_task_handle_);
+        rx_task_handle_ = nullptr;
+        return false;
+    }
+
+    ESP_LOGI(TAG, "UART bridge tasks started");
+    return true;
+}
+
+void uart_bridge_t::stop()
+{
+    if (rx_task_handle_ != nullptr)
+    {
+        vTaskDelete(rx_task_handle_);
+        rx_task_handle_ = nullptr;
+    }
+
+    if (tx_task_handle_ != nullptr)
+    {
+        vTaskDelete(tx_task_handle_);
+        tx_task_handle_ = nullptr;
+    }
+
+    if (tx_queue_ != nullptr)
+    {
+        vQueueDelete(tx_queue_);
+        tx_queue_ = nullptr;
+    }
+
+    if (uart_event_queue_ != nullptr)
+    {
+        vQueueDelete(uart_event_queue_);
+        uart_event_queue_ = nullptr;
+    }
+
+    if (initialized_)
+    {
+        uart_driver_delete(uart_num_);
+        initialized_ = false;
+    }
+}
+
+bool uart_bridge_t::send_message(const msg_header_t* header, const u8* payload, u32 payload_len)
+{
+    if (!initialized_ || header == nullptr)
+    {
+        return false;
+    }
+
+    ESP_LOGI(TAG, "[DEBUG] send_message: dst=%d, payload_len=%u, header->payload_len=%u", 
+             header->destination_id, payload_len, header->payload_len);
+
+    // Упаковываем сообщение
+    u32 total_size = MSG_HEADER_LEN + payload_len;
+    std::vector<u8>* buffer = new std::vector<u8>(total_size);
+    
+    u32 packed_size = msg_pack(header, payload, payload_len, buffer->data());
+    ESP_LOGI(TAG, "[DEBUG] msg_pack: packed_size=%u", packed_size);
+    
+    if (packed_size == 0)
+    {
+        ESP_LOGE(TAG, "[DEBUG] msg_pack failed!");
+        delete buffer;
+        return false;
+    }
+
+    buffer->resize(packed_size);
+    
+    // Показываем только критичные байты payload_len [7-10] (без больших буферов)
+    ESP_LOGI(TAG, "[PACK] payload_len[7-10]=%02X %02X %02X %02X", 
+             buffer->data()[7], buffer->data()[8], 
+             buffer->data()[9], buffer->data()[10]);
+    
+    if (payload_len > 0 && payload_len <= 2)
+    {
+        ESP_LOGI(TAG, "[PACK] Payload[0-1]=%02X %02X", 
+                 payload_len > 0 ? payload[0] : 0, 
+                 payload_len > 1 ? payload[1] : 0);
+    }
+
+    // Отправляем в очередь
+    if (xQueueSend(tx_queue_, &buffer, pdMS_TO_TICKS(100)) != pdTRUE)
+    {
+        ESP_LOGW(TAG, "Failed to queue message for transmission");
+        delete buffer;
+        return false;
+    }
+
+    return true;
+}
+
+void uart_bridge_t::set_message_callback(uart_message_callback_t callback)
+{
+    rx_callback_ = callback;
+}
+
+void uart_bridge_t::uart_rx_task(void* pvParameters)
+{
+    uart_bridge_t* bridge = static_cast<uart_bridge_t*>(pvParameters);
+    uint8_t* data = (uint8_t*)malloc(UART_RX_BUF_SIZE);
+    
+    if (data == NULL)
+    {
+        ESP_LOGE(TAG, "Failed to allocate RX buffer");
+        vTaskDelete(NULL);
+        return;
+    }
+
+    ESP_LOGI(TAG, "UART RX task started (event-driven)");
+    
+    uart_event_t event;
+    int idle_count = 0;
+    const int IDLE_LOG_INTERVAL = 50;
+
+    while (1)
+    {
+        // Ждем события от UART (блокирующий вызов)
+        if (xQueueReceive(bridge->uart_event_queue_, &event, portMAX_DELAY))
+        {
+            idle_count = 0;  // Сбрасываем счетчик при получении события
+            
+            switch (event.type)
+            {
+            case UART_DATA:
+                // Получены данные - читаем их
+                {
+                    int len = uart_read_bytes(bridge->uart_num_, data, UART_RX_BUF_SIZE, 0);
+                    
+                    if (len > 0)
+                    {
+                        // Уменьшаем количество логов - только для маленьких пакетов
+                        if (len <= 20)
+                        {
+                            ESP_LOGI(TAG, "[RX] %d bytes (event-driven)", len);
+                        }
+                        
+                        // Добавляем данные в буфер
+                        bridge->rx_buffer_.insert(bridge->rx_buffer_.end(), data, data + len);
+                        
+                        // Обрабатываем буфер
+                        bridge->process_rx_buffer();
+                    }
+                }
+                break;
+                
+            case UART_FIFO_OVF:
+                ESP_LOGE(TAG, "[RX] UART FIFO overflow");
+                uart_flush_input(bridge->uart_num_);
+                bridge->rx_buffer_.clear();
+                break;
+                
+            case UART_BUFFER_FULL:
+                ESP_LOGE(TAG, "[RX] UART buffer full");
+                uart_flush_input(bridge->uart_num_);
+                bridge->rx_buffer_.clear();
+                break;
+                
+            case UART_BREAK:
+                ESP_LOGW(TAG, "[RX] UART break detected");
+                break;
+                
+            case UART_PARITY_ERR:
+                ESP_LOGE(TAG, "[RX] UART parity error");
+                break;
+                
+            case UART_FRAME_ERR:
+                ESP_LOGE(TAG, "[RX] UART frame error");
+                break;
+                
+            default:
+                ESP_LOGD(TAG, "[RX] UART event type: %d", event.type);
+                break;
+            }
+        }
+        else
+        {
+            // Не должно происходить, так как portMAX_DELAY блокирует навсегда
+            idle_count++;
+            if (idle_count >= IDLE_LOG_INTERVAL)
+            {
+                ESP_LOGI(TAG, "[RX] UART RX task alive, waiting for events... (buffer size: %zu, uart_num=%d)", 
+                         bridge->rx_buffer_.size(), bridge->uart_num_);
+                idle_count = 0;
+            }
+        }
+    }
+
+    free(data);
+    vTaskDelete(NULL);
+}
+
+void uart_bridge_t::uart_tx_task(void* pvParameters)
+{
+    uart_bridge_t* bridge = static_cast<uart_bridge_t*>(pvParameters);
+    std::vector<u8>* buffer = nullptr;
+
+    ESP_LOGI(TAG, "UART TX task started");
+
+    while (1)
+    {
+        if (xQueueReceive(bridge->tx_queue_, &buffer, portMAX_DELAY) == pdTRUE)
+        {
+            if (buffer != nullptr)
+            {
+                int len = uart_write_bytes(bridge->uart_num_, buffer->data(), buffer->size());
+                if (len < 0)
+                {
+                    ESP_LOGE(TAG, "UART write failed");
+                }
+                else
+                {
+                    ESP_LOGI(TAG, "Sent %d bytes via UART", len);
+                    // Отладочный вывод: показываем только критичные байты payload_len (без больших буферов)
+                    if (len >= 11)
+                    {
+                        ESP_LOGI(TAG, "[TX] payload_len[7-10]=%02X %02X %02X %02X", 
+                                 buffer->data()[7], buffer->data()[8], 
+                                 buffer->data()[9], buffer->data()[10]);
+                    }
+                }
+                
+                delete buffer;
+            }
+        }
+    }
+
+    vTaskDelete(NULL);
+}
+
+void uart_bridge_t::process_rx_buffer()
+{
+    while (rx_buffer_.size() >= MSG_HEADER_LEN)
+    {
+        // Проверяем, достаточно ли данных для заголовка
+        if (rx_buffer_.size() < MSG_HEADER_LEN)
+        {
+            // Недостаточно данных даже для заголовка - ждем
+            break;
+        }
+        
+        // Читаем заголовок вручную для проверки валидности
+        msg_header_t temp_header;
+        temp_header.msg_type = rx_buffer_[0];
+        temp_header.source_id = rx_buffer_[1];
+        temp_header.destination_id = rx_buffer_[2];
+        temp_header.route_flags = rx_buffer_[3];
+        temp_header.priority = rx_buffer_[4];
+        temp_header.stream_id = (u16)(rx_buffer_[5] | (rx_buffer_[6] << 8));
+        temp_header.payload_len = (u32)(rx_buffer_[7] | (rx_buffer_[8] << 8) | 
+            (rx_buffer_[9] << 16) | (rx_buffer_[10] << 24));
+        temp_header.sequence = rx_buffer_[11];
+        
+        // Проверяем валидность заголовка
+        if (!msg_validate_header(&temp_header))
+        {
+            // Заголовок невалиден - сбрасываем буфер
+            // Правило: если не получилось обработать заголовок - он сбрасывается без уведомления отправителю
+            ESP_LOGW(TAG, "[RX] Invalid header, clearing buffer (%zu bytes)", rx_buffer_.size());
+            rx_buffer_.clear();
+            break;
+        }
+        
+        // Заголовок валиден, проверяем, достаточно ли данных для полного пакета
+        u32 expected_total = MSG_HEADER_LEN + temp_header.payload_len;
+        if (rx_buffer_.size() < expected_total)
+        {
+            // Данных недостаточно для полного пакета - ждем
+            break;
+        }
+        
+        // Данных достаточно, пытаемся распарсить сообщение
+        msg_header_t header;
+        const u8* payload = nullptr;
+        u32 payload_len = 0;
+        
+        if (!msg_unpack(rx_buffer_.data(), static_cast<u32>(rx_buffer_.size()), &header, &payload, &payload_len))
+        {
+            // Это не должно происходить, так как мы уже проверили валидность заголовка
+            // Но на всякий случай сбрасываем буфер
+            ESP_LOGE(TAG, "[RX] msg_unpack failed unexpectedly, clearing buffer (%zu bytes)", rx_buffer_.size());
+            rx_buffer_.clear();
+            break;
+        }
+        else
+        {
+            // Успешно распарсили сообщение
+            u32 total_size = MSG_HEADER_LEN + payload_len;
+            
+            // Уменьшаем количество логов для снижения нагрузки
+            ESP_LOGI(TAG, "[RX] Msg: type=%d src=%d dst=%d len=%u", 
+                     header.msg_type, header.source_id, header.destination_id, payload_len);
+            
+            rx_buffer_.erase(rx_buffer_.begin(), rx_buffer_.begin() + total_size);
+
+            // Вызываем callback
+            if (rx_callback_)
+            {
+                rx_callback_(&header, payload, payload_len);
+            }
+            else
+            {
+                ESP_LOGW(TAG, "[RX] No callback!");
+            }
+        }
+    }
+}
