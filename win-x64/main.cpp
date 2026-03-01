@@ -117,20 +117,37 @@ void handle_new_message(const msg_header_t& header, const u8* payload, u32 paylo
     std::cout << "  Priority: " << static_cast<int>(header.priority) << std::endl;
     std::cout << "  Payload length: " << header.payload_len << " bytes" << std::endl;
     
-    // Обработка ответов от ESP32 (включая изображения)
-    if (header.source_id == MSG_SRC_ESP32 && 
-        header.msg_type == MSG_TYPE_RESPONSE && payload && payload_len > 0)
-    {
-        const char* component_name = "ESP32";
-        msg_destination_t dst_key = MSG_DST_ESP32;
-        
+        // Обработка ответов от ESP32 (включая изображения)
+        if (header.source_id == MSG_SRC_ESP32 && 
+            header.msg_type == MSG_TYPE_RESPONSE && payload && payload_len > 0)
+        {
+            const char* component_name = "ESP32";
+            msg_destination_t dst_key = MSG_DST_ESP32;
+            
         std::cout << ANSI_INFO << "[app] [HANDLE] Processing response from " << component_name 
                   << ", payload_len=" << payload_len << ANSI_ENDL;
         
-        // Проверяем, является ли это текстовым ответом (TEST_RESPONSE или STATUS:)
+        // Проверяем тип ответа по payload
+        bool is_chunk_ack = false;
+        bool is_final_response = false;
+        std::string payload_str;
+        
         if (payload_len < 1000)  // Текстовые ответы обычно маленькие
         {
-            std::string payload_str(reinterpret_cast<const char*>(payload), payload_len);
+            payload_str = std::string(reinterpret_cast<const char*>(payload), payload_len);
+            
+            // Проверяем, является ли это CHUNK_ACK (не очищаем test_id для него)
+            if (payload_str.find("CHUNK_ACK:") == 0)
+            {
+                is_chunk_ack = true;
+                std::cout << ANSI_INFO << "[app] [HANDLE] This is a CHUNK_ACK, keeping test_id mapping" << ANSI_ENDL;
+            }
+            // Проверяем, является ли это финальным ответом (LCD_FRAME_OK)
+            else if (payload_str.find("LCD_FRAME_OK") == 0)
+            {
+                is_final_response = true;
+                std::cout << ANSI_INFO << "[app] [HANDLE] This is LCD_FRAME_OK final response" << ANSI_ENDL;
+            }
             
             // Проверяем, является ли это ответом на тест
             if (payload_str == "TEST_RESPONSE")
@@ -217,15 +234,21 @@ void handle_new_message(const msg_header_t& header, const u8* payload, u32 paylo
                               << " response forwarded to all clients (fallback) with test_id=" << test_id << ANSI_ENDL;
                 }
                 
-                // Очищаем test_id после успешной отправки ответа
-                if (!test_id.empty())
+                // Очищаем test_id только для финальных ответов (не для CHUNK_ACK)
+                // CHUNK_ACK - это промежуточные подтверждения, test_id нужен для финального ответа
+                if (!test_id.empty() && !is_chunk_ack)
                 {
                     {
                         std::lock_guard<std::mutex> lock(g_destination_to_test_id_mutex);
                         g_destination_to_test_id.erase(dst_key);
-                        std::cout << ANSI_INFO << "[app] [HANDLE] Cleared test_id mapping for " << component_name << ANSI_ENDL;
+                        std::cout << ANSI_INFO << "[app] [HANDLE] Cleared test_id mapping for " << component_name 
+                                  << (is_final_response ? " (final response)" : "") << ANSI_ENDL;
                     }
                     // Не удаляем из g_test_clients, так как клиент может использовать тот же test_id для других запросов
+                }
+                else if (is_chunk_ack)
+                {
+                    std::cout << ANSI_INFO << "[app] [HANDLE] Keeping test_id mapping for CHUNK_ACK" << ANSI_ENDL;
                 }
             }
             else
