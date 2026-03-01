@@ -42,30 +42,41 @@ static Ili9486Display* s_lcd = nullptr;
 static constexpr u16 LCD_STREAM_ID_FRAME = 1;
 
 // Структура для хранения одного чанка в буфере
+// ВАЖНО для ИИ-агента: Используется для буферизации неупорядоченных чанков
+// Если чанки приходят не по порядку (например, чанк 3 раньше чанка 2),
+// они буферизуются здесь до тех пор, пока не наступит их очередь
 struct LcdChunk
 {
-    u8*  data;
-    u32  data_len;
-    u16  y_start;
-    u16  height_chunk;
-    bool valid;
+    u8*  data;          // Выделенная память для данных чанка (освобождается после вывода)
+    u32  data_len;      // Размер данных в байтах
+    u16  y_start;       // Начальная Y-координата этого чанка
+    u16  height_chunk;  // Количество строк в этом чанке
+    bool valid;         // Флаг валидности (true = чанк готов к выводу)
 };
 
 // Состояние потокового вывода кадра на дисплей (с буферизацией для переупорядочивания)
+// ВАЖНО для ИИ-агента:
+// - ESP32 НЕ накапливает весь кадр в памяти (307KB для 480x320 RGB565)
+// - Вместо этого чанки выводятся сразу на дисплей по мере поступления
+// - Буферизуются только неупорядоченные чанки (до MAX_BUFFERED_CHUNKS)
+// - Это позволяет выводить изображения на ESP32 с ограниченной памятью
 struct LcdStreamState
 {
-    u16  width         = 0;
-    u16  height        = 0;
-    u16  total_chunks  = 0;
-    u16  received_chunks = 0;
-    u16  format_code   = 0;
-    u16  next_y        = 0;  // Следующая ожидаемая Y-координата для вывода
-    bool active        = false;
+    u16  width         = 0;  // Ширина кадра (480 для MAR3501)
+    u16  height        = 0;  // Высота кадра (320 для MAR3501)
+    u16  total_chunks  = 0;  // Общее количество чанков в кадре
+    u16  received_chunks = 0;  // Количество полученных чанков
+    u16  format_code   = 0;  // Код формата (1 = RGB565_BE)
+    u16  next_y        = 0;  // Следующая ожидаемая Y-координата для вывода (для проверки порядка)
+    bool active        = false;  // Флаг активного потока (true = идёт передача кадра)
     
     // Буфер для переупорядочивания чанков (максимум 32 чанка)
+    // ВАЖНО: Если чанки приходят строго по порядку, буфер не используется
+    // Если чанки приходят не по порядку, они буферизуются здесь
+    // Увеличьте MAX_BUFFERED_CHUNKS, если часто теряются чанки из-за переполнения буфера
     static constexpr u16 MAX_BUFFERED_CHUNKS = 32;
     LcdChunk buffered_chunks[MAX_BUFFERED_CHUNKS];
-    u16 buffered_count = 0;
+    u16 buffered_count = 0;  // Текущее количество буферизованных чанков
 };
 
 static LcdStreamState s_lcd_stream;
@@ -329,15 +340,21 @@ static void handle_new_message(const msg_header_t* header, const u8* payload, u3
         {
             const u8* chunk_data = payload + header_size;
             
-            // Если чанк идёт по порядку - выводим сразу
+            // ВАЖНО для ИИ-агента: Логика обработки чанков
+            // Если чанк идёт по порядку (y_start == next_y) - выводим сразу на дисплей
+            // Если чанк не по порядку - буферизуем его для последующего вывода
+            // Это позволяет обрабатывать неупорядоченные чанки без потери данных
             if (y_start == s_lcd_stream.next_y)
             {
+                // Чанк идёт по порядку - выводим сразу (потоковый режим, без накопления в памяти)
                 s_lcd->drawRgb565Chunk(chunk_data, width, y_start, height_chunk);
                 s_lcd_stream.next_y = y_start + height_chunk;
                 ESP_LOGI(TAG, "[ESP32] STREAM chunk drawn immediately: y=%u-%u, next_y=%u", 
                          y_start, y_start + height_chunk - 1, s_lcd_stream.next_y);
                 
-                // Отправляем подтверждение приёма этого чанка (для flow control)
+                // ВАЖНО: Отправляем подтверждение приёма этого чанка (для flow control)
+                // Python ждёт этого подтверждения перед отправкой следующего чанка
+                // Без этого TCP буфер на win-x64 переполняется (WSAEWOULDBLOCK)
                 char ack_buf[32];
                 int ack_len = snprintf(ack_buf, sizeof(ack_buf), "CHUNK_ACK:%u", chunk_index);
                 if (ack_len > 0 && ack_len < (int)sizeof(ack_buf))
@@ -467,11 +484,14 @@ static void handle_new_message(const msg_header_t* header, const u8* payload, u3
 
         s_lcd_stream.received_chunks++;
 
-        // Проверяем завершение кадра
-        // Кадр завершён только когда:
-        // 1. Все чанки получены (received_chunks >= total_chunks)
-        // 2. Все чанки выведены (next_y >= height)
+        // ВАЖНО для ИИ-агента: Проверка завершения кадра
+        // Кадр завершён только когда ВСЕ три условия выполнены одновременно:
+        // 1. Все чанки получены (received_chunks >= total_chunks) - все данные пришли
+        // 2. Все чанки выведены (next_y >= height) - весь кадр нарисован на дисплее
         // 3. Буфер пуст (buffered_count == 0) - все буферизованные чанки выведены
+        // 
+        // Раньше было условие "ИЛИ" (||), что приводило к преждевременному завершению
+        // при получении всех чанков, даже если они ещё не выведены из буфера
         bool all_chunks_received = (s_lcd_stream.received_chunks >= s_lcd_stream.total_chunks);
         bool all_chunks_drawn = (s_lcd_stream.next_y >= s_lcd_stream.height);
         bool buffer_empty = (s_lcd_stream.buffered_count == 0);

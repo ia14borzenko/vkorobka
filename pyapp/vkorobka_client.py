@@ -100,7 +100,15 @@ class VkorobkaClient:
                 break
     
     def _handle_response(self, message: Dict):
-        """Обработка полученного ответа"""
+        """
+        Обработка полученного ответа.
+        
+        ВАЖНО для ИИ-агента:
+        - Payload в JSON всегда base64-кодирован (win-x64 кодирует все payload в base64)
+        - CHUNK_ACK имеет формат "CHUNK_ACK:{chunk_index}" (например, "CHUNK_ACK:5")
+        - CHUNK_ACK используется для flow control - Python ждёт подтверждения перед отправкой следующего чанка
+        - Финальный ответ LCD_FRAME_OK приходит с тем же test_id, что и все чанки
+        """
         # Проверяем, является ли это подтверждением чанка (CHUNK_ACK)
         # Payload в JSON всегда base64-кодирован, нужно декодировать
         payload_b64 = message.get('payload', '')
@@ -352,8 +360,11 @@ class VkorobkaClient:
             )
             
             # Ждём подтверждения приёма этого чанка (flow control)
+            # ВАЖНО: Это критически важно для предотвращения переполнения TCP буферов на win-x64
+            # ESP32 может обрабатывать чанки медленнее, чем Python их отправляет
+            # Без flow control TCP буфер переполняется (WSAEWOULDBLOCK ошибка)
             print(f"[client] [STREAM] Ожидание подтверждения для чанка {chunk_index}...")
-            chunk_ack_timeout = 5.0  # 5 секунд на чанк
+            chunk_ack_timeout = 5.0  # 5 секунд на чанк (можно увеличить для медленных сетей)
             start_time = time.time()
             ack_received = False
             
@@ -363,9 +374,11 @@ class VkorobkaClient:
                         ack_received = True
                         del self.pending_chunk_acks[chunk_ack_key]
                         break
-                time.sleep(0.05)  # Проверяем каждые 50 мс
+                time.sleep(0.05)  # Проверяем каждые 50 мс (не блокируем поток приёма)
             
             if not ack_received:
+                # ВАЖНО: Даже при таймауте продолжаем отправку следующих чанков
+                # Это позволяет системе восстановиться, если один чанк потерян
                 print(f"[client] [STREAM] ⚠️ Таймаут подтверждения для чанка {chunk_index}, продолжаем...")
                 with self.response_lock:
                     if chunk_ack_key in self.pending_chunk_acks:

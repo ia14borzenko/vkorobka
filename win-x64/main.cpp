@@ -127,27 +127,32 @@ void handle_new_message(const msg_header_t& header, const u8* payload, u32 paylo
         std::cout << ANSI_INFO << "[app] [HANDLE] Processing response from " << component_name 
                   << ", payload_len=" << payload_len << ANSI_ENDL;
         
-        // Проверяем тип ответа по payload
-        bool is_chunk_ack = false;
-        bool is_final_response = false;
-        std::string payload_str;
-        
-        if (payload_len < 1000)  // Текстовые ответы обычно маленькие
-        {
-            payload_str = std::string(reinterpret_cast<const char*>(payload), payload_len);
+            // ВАЖНО для ИИ-агента: Определение типа ответа для правильной обработки test_id
+            // CHUNK_ACK - промежуточные подтверждения, test_id НЕ должен очищаться
+            // LCD_FRAME_OK - финальный ответ, test_id должен быть очищен после отправки
+            // Это критически важно, иначе финальный ответ придёт без test_id и Python его не обработает
+            bool is_chunk_ack = false;
+            bool is_final_response = false;
+            std::string payload_str;
             
-            // Проверяем, является ли это CHUNK_ACK (не очищаем test_id для него)
-            if (payload_str.find("CHUNK_ACK:") == 0)
+            if (payload_len < 1000)  // Текстовые ответы обычно маленькие
             {
-                is_chunk_ack = true;
-                std::cout << ANSI_INFO << "[app] [HANDLE] This is a CHUNK_ACK, keeping test_id mapping" << ANSI_ENDL;
-            }
-            // Проверяем, является ли это финальным ответом (LCD_FRAME_OK)
-            else if (payload_str.find("LCD_FRAME_OK") == 0)
-            {
-                is_final_response = true;
-                std::cout << ANSI_INFO << "[app] [HANDLE] This is LCD_FRAME_OK final response" << ANSI_ENDL;
-            }
+                payload_str = std::string(reinterpret_cast<const char*>(payload), payload_len);
+                
+                // Проверяем, является ли это CHUNK_ACK (не очищаем test_id для него)
+                // CHUNK_ACK используется для flow control - Python ждёт подтверждения перед отправкой следующего чанка
+                if (payload_str.find("CHUNK_ACK:") == 0)
+                {
+                    is_chunk_ack = true;
+                    std::cout << ANSI_INFO << "[app] [HANDLE] This is a CHUNK_ACK, keeping test_id mapping" << ANSI_ENDL;
+                }
+                // Проверяем, является ли это финальным ответом (LCD_FRAME_OK)
+                // LCD_FRAME_OK отправляется после завершения всех чанков и вывода всего кадра
+                else if (payload_str.find("LCD_FRAME_OK") == 0)
+                {
+                    is_final_response = true;
+                    std::cout << ANSI_INFO << "[app] [HANDLE] This is LCD_FRAME_OK final response" << ANSI_ENDL;
+                }
             
             // Проверяем, является ли это ответом на тест
             if (payload_str == "TEST_RESPONSE")
@@ -234,8 +239,13 @@ void handle_new_message(const msg_header_t& header, const u8* payload, u32 paylo
                               << " response forwarded to all clients (fallback) with test_id=" << test_id << ANSI_ENDL;
                 }
                 
-                // Очищаем test_id только для финальных ответов (не для CHUNK_ACK)
-                // CHUNK_ACK - это промежуточные подтверждения, test_id нужен для финального ответа
+                // ВАЖНО для ИИ-агента: Очистка test_id только для финальных ответов
+                // CHUNK_ACK - это промежуточные подтверждения, test_id НЕ должен очищаться
+                //   (иначе финальный LCD_FRAME_OK придёт без test_id и Python его не обработает)
+                // LCD_FRAME_OK - это финальный ответ, после него test_id можно очистить
+                // 
+                // Раньше test_id очищался после каждого ответа, что приводило к потере test_id
+                // для финального ответа, если он приходил после последнего CHUNK_ACK
                 if (!test_id.empty() && !is_chunk_ack)
                 {
                     {

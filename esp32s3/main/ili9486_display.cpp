@@ -248,6 +248,18 @@ void Ili9486Display::drawRgb565Frame(const uint8_t* data, uint16_t width, uint16
     }
 }
 
+// ВАЖНО для ИИ-агента: Потоковый вывод чанка RGB565 на дисплей
+// Этот метод выводит прямоугольную область изображения без накопления всего кадра в памяти
+// Используется для потоковой передачи больших изображений на ESP32 с ограниченной памятью
+// 
+// Параметры:
+// - data: указатель на RGB565 данные (big-endian, формат: HI,LO на пиксель)
+// - width: ширина чанка в пикселях (обычно 480 для полной ширины экрана)
+// - y_start: начальная Y-координата на экране (0 = верх экрана)
+// - height_chunk: количество строк в чанке (обычно 20 строк)
+//
+// Формат данных: RGB565 big-endian (старший байт первым)
+// Каждая строка: width * 2 байта (RGB565 = 2 байта на пиксель)
 void Ili9486Display::drawRgb565Chunk(const uint8_t* data, uint16_t width, uint16_t y_start, uint16_t height_chunk) {
     if (!data) {
         ESP_LOGE(TAG_LCD, "drawRgb565Chunk: data is null");
@@ -259,16 +271,18 @@ void Ili9486Display::drawRgb565Chunk(const uint8_t* data, uint16_t width, uint16
         return;
     }
 
+    // Ограничиваем ширину размером экрана
     if (width > WIDTH) {
         width = WIDTH;
     }
 
-    // Проверяем границы
+    // Проверяем границы по Y
     if (y_start >= HEIGHT) {
         ESP_LOGW(TAG_LCD, "drawRgb565Chunk: y_start=%u >= HEIGHT=%u", y_start, HEIGHT);
         return;
     }
 
+    // Обрезаем чанк, если он выходит за границы экрана
     uint16_t y_end = y_start + height_chunk;
     if (y_end > HEIGHT) {
         y_end = HEIGHT;
@@ -278,16 +292,24 @@ void Ili9486Display::drawRgb565Chunk(const uint8_t* data, uint16_t width, uint16
         }
     }
 
-    const uint16_t line_bytes = static_cast<uint16_t>(width * 2);
+    const uint16_t line_bytes = static_cast<uint16_t>(width * 2);  // RGB565 = 2 байта на пиксель
 
+    // Выводим каждую строку чанка на дисплей
+    // ВАЖНО: Каждая строка выводится отдельным вызовом esp_lcd_panel_io_tx_color
+    // Это позволяет не накапливать весь чанк в памяти перед выводом
     for (uint16_t y = 0; y < height_chunk; ++y) {
-        uint16_t screen_y = y_start + y;
-        const uint8_t* line_ptr = data + static_cast<size_t>(y) * line_bytes;
+        uint16_t screen_y = y_start + y;  // Абсолютная Y-координата на экране
+        const uint8_t* line_ptr = data + static_cast<size_t>(y) * line_bytes;  // Указатель на начало строки в данных
+        
+        // Устанавливаем адресное окно для одной строки (x=0 до width-1, y=screen_y)
         setAddressWindow(0, screen_y, width - 1, screen_y);
+        
+        // Отправляем данные строки на дисплей через I80 интерфейс
+        // 0x2C = команда записи пикселей в ILI9486
         esp_err_t err = esp_lcd_panel_io_tx_color(io_, 0x2C, line_ptr, line_bytes);
         if (err != ESP_OK) {
             ESP_LOGE(TAG_LCD, "drawRgb565Chunk: tx_color failed at line %u (screen_y=%u), err=0x%x", y, screen_y, err);
-            break;
+            break;  // Прерываем вывод при ошибке
         }
     }
 }
