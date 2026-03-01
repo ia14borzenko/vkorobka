@@ -313,3 +313,54 @@ void Ili9486Display::drawRgb565Chunk(const uint8_t* data, uint16_t width, uint16
         }
     }
 }
+
+void Ili9486Display::drawChar(const uint8_t* data, uint16_t char_width, uint16_t char_height, uint16_t x, uint16_t y) {
+    if (!data) {
+        ESP_LOGE(TAG_LCD, "drawChar: data is null");
+        return;
+    }
+
+    if (char_width == 0 || char_height == 0) {
+        ESP_LOGW(TAG_LCD, "drawChar: zero size char (%u x %u)", char_width, char_height);
+        return;
+    }
+
+    // Проверяем границы
+    if (x >= WIDTH || y >= HEIGHT) {
+        ESP_LOGW(TAG_LCD, "drawChar: position out of bounds (%u, %u)", x, y);
+        return;
+    }
+
+    // Обрезаем символ, если он выходит за границы экрана
+    uint16_t draw_width = char_width;
+    uint16_t draw_height = char_height;
+    if (x + draw_width > WIDTH) {
+        draw_width = WIDTH - x;
+    }
+    if (y + draw_height > HEIGHT) {
+        draw_height = HEIGHT - y;
+    }
+
+    if (draw_width == 0 || draw_height == 0) {
+        return;
+    }
+
+    const uint16_t line_bytes = static_cast<uint16_t>(draw_width * 2);  // RGB565 = 2 байта на пиксель
+    const uint16_t char_line_bytes = static_cast<uint16_t>(char_width * 2);  // Полная ширина символа
+
+    // Выводим каждую строку символа
+    for (uint16_t yy = 0; yy < draw_height; ++yy) {
+        uint16_t screen_y = y + yy;
+        const uint8_t* line_ptr = data + static_cast<size_t>(yy) * char_line_bytes;
+        
+        // Устанавливаем адресное окно для одной строки
+        setAddressWindow(x, screen_y, x + draw_width - 1, screen_y);
+        
+        // Отправляем данные строки на дисплей
+        esp_err_t err = esp_lcd_panel_io_tx_color(io_, 0x2C, line_ptr, line_bytes);
+        if (err != ESP_OK) {
+            ESP_LOGE(TAG_LCD, "drawChar: tx_color failed at line %u (screen_y=%u), err=0x%x", yy, screen_y, err);
+            break;
+        }
+    }
+}
