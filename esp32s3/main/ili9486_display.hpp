@@ -19,6 +19,18 @@ public:
     // Тестовый паттерн: цветовые градиенты + полоса градаций серого
     void drawTestPattern();
 
+    // Вывод полного кадра RGB565 (big-endian HI,LO на пиксель) из буфера.
+    // Данные должны быть размером не менее width*height*2 байта.
+    void drawRgb565Frame(const uint8_t* data, uint16_t width, uint16_t height);
+
+    // Вывод части кадра (чанка) RGB565 сразу на дисплей.
+    // data: буфер с RGB565 данными (big-endian HI,LO)
+    // width: ширина кадра (в пикселях)
+    // y_start: начальная Y-координата (строка) для вывода
+    // height_chunk: количество строк для вывода
+    // Используется для потокового вывода без накопления всего кадра в памяти.
+    void drawRgb565Chunk(const uint8_t* data, uint16_t width, uint16_t y_start, uint16_t height_chunk);
+
 private:
     esp_lcd_panel_io_handle_t io_;
 

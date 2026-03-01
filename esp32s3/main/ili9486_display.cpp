@@ -215,3 +215,79 @@ void Ili9486Display::drawTestPattern() {
     }
 }
 
+void Ili9486Display::drawRgb565Frame(const uint8_t* data, uint16_t width, uint16_t height) {
+    if (!data) {
+        ESP_LOGE(TAG_LCD, "drawRgb565Frame: data is null");
+        return;
+    }
+
+    if (width == 0 || height == 0) {
+        ESP_LOGW(TAG_LCD, "drawRgb565Frame: zero size frame (%u x %u)", width, height);
+        return;
+    }
+
+    if (width > WIDTH) {
+        width = WIDTH;
+    }
+    if (height > HEIGHT) {
+        height = HEIGHT;
+    }
+
+    ESP_LOGI(TAG_LCD, "drawRgb565Frame: drawing frame %ux%u", width, height);
+
+    const uint16_t line_bytes = static_cast<uint16_t>(width * 2);
+
+    for (uint16_t y = 0; y < height; ++y) {
+        const uint8_t* line_ptr = data + static_cast<size_t>(y) * line_bytes;
+        setAddressWindow(0, y, width - 1, y);
+        esp_err_t err = esp_lcd_panel_io_tx_color(io_, 0x2C, line_ptr, line_bytes);
+        if (err != ESP_OK) {
+            ESP_LOGE(TAG_LCD, "drawRgb565Frame: tx_color failed at line %u, err=0x%x", y, err);
+            break;
+        }
+    }
+}
+
+void Ili9486Display::drawRgb565Chunk(const uint8_t* data, uint16_t width, uint16_t y_start, uint16_t height_chunk) {
+    if (!data) {
+        ESP_LOGE(TAG_LCD, "drawRgb565Chunk: data is null");
+        return;
+    }
+
+    if (width == 0 || height_chunk == 0) {
+        ESP_LOGW(TAG_LCD, "drawRgb565Chunk: zero size chunk (width=%u, height=%u)", width, height_chunk);
+        return;
+    }
+
+    if (width > WIDTH) {
+        width = WIDTH;
+    }
+
+    // Проверяем границы
+    if (y_start >= HEIGHT) {
+        ESP_LOGW(TAG_LCD, "drawRgb565Chunk: y_start=%u >= HEIGHT=%u", y_start, HEIGHT);
+        return;
+    }
+
+    uint16_t y_end = y_start + height_chunk;
+    if (y_end > HEIGHT) {
+        y_end = HEIGHT;
+        height_chunk = y_end - y_start;
+        if (height_chunk == 0) {
+            return;
+        }
+    }
+
+    const uint16_t line_bytes = static_cast<uint16_t>(width * 2);
+
+    for (uint16_t y = 0; y < height_chunk; ++y) {
+        uint16_t screen_y = y_start + y;
+        const uint8_t* line_ptr = data + static_cast<size_t>(y) * line_bytes;
+        setAddressWindow(0, screen_y, width - 1, screen_y);
+        esp_err_t err = esp_lcd_panel_io_tx_color(io_, 0x2C, line_ptr, line_bytes);
+        if (err != ESP_OK) {
+            ESP_LOGE(TAG_LCD, "drawRgb565Chunk: tx_color failed at line %u (screen_y=%u), err=0x%x", y, screen_y, err);
+            break;
+        }
+    }
+}

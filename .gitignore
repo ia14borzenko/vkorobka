@@ -35,3 +35,6 @@ esp32s3/.cache/
 *.scvd
 *.iex
 *.idx
+
+pyapp\__pycache__\
+*.pyc

@@ -2,6 +2,9 @@
 Утилиты для работы с изображениями
 """
 import io
+from pathlib import Path
+from typing import Tuple
+
 from PIL import Image, ImageDraw
 import base64
 
@@ -171,3 +174,88 @@ def base64_to_image(base64_str):
         bytes: JPG данные
     """
     return base64.b64decode(base64_str)
+
+
+def load_bg_image(path: str = "bg.jpg") -> Image.Image:
+    """
+    Загружает фоновое изображение и приводит его к размеру дисплея 480x320.
+
+    Args:
+        path: Относительный или абсолютный путь к файлу bg.jpg.
+
+    Returns:
+        PIL.Image в режиме RGB размером 480x320.
+    """
+    p = Path(path)
+    if not p.is_file():
+        # Пытаемся найти рядом с текущим модулем (pyapp/bg.jpg)
+        module_dir = Path(__file__).resolve().parent
+        candidate = module_dir / "bg.jpg"
+        if candidate.is_file():
+            p = candidate
+
+    img = Image.open(p).convert("RGB")
+
+    target_w, target_h = 480, 320
+
+    # Масштабируем с сохранением пропорций, затем центрируем и обрезаем/дополняем
+    img = _resize_and_letterbox(img, (target_w, target_h))
+    return img
+
+
+def _resize_and_letterbox(img: Image.Image, target_size: Tuple[int, int]) -> Image.Image:
+    """
+    Масштабирует изображение с сохранением пропорций и вписывает в целевой размер
+    с возможным добавлением полей (letterbox) по краям.
+    """
+    target_w, target_h = target_size
+    src_w, src_h = img.size
+
+    scale = min(target_w / src_w, target_h / src_h)
+    new_w = int(src_w * scale)
+    new_h = int(src_h * scale)
+
+    resized = img.resize((new_w, new_h), Image.Resampling.LANCZOS)
+
+    canvas = Image.new("RGB", (target_w, target_h), color="black")
+    offset_x = (target_w - new_w) // 2
+    offset_y = (target_h - new_h) // 2
+    canvas.paste(resized, (offset_x, offset_y))
+    return canvas
+
+
+def image_to_rgb565_be(img: Image.Image) -> bytes:
+    """
+    Конвертирует изображение в буфер RGB565 (big-endian HI,LO на пиксель),
+    совместимый с контроллером ILI9486.
+
+    Args:
+        img: PIL.Image в любом режиме (будет приведено к RGB).
+
+    Returns:
+        bytes: последовательно упакованные пиксели в формате RGB565 BE.
+    """
+    if img.mode != "RGB":
+        img = img.convert("RGB")
+
+    width, height = img.size
+    pixels = img.load()
+
+    out = bytearray(width * height * 2)
+    idx = 0
+
+    for y in range(height):
+        # Читаем пиксели справа налево для исправления зеркалирования
+        for x in reversed(range(width)):  # от width-1 до 0 включительно
+            r, g, b = pixels[x, y]
+            # Преобразование в RGB565
+            r5 = (r >> 3) & 0x1F
+            g6 = (g >> 2) & 0x3F
+            b5 = (b >> 3) & 0x1F
+
+            value = (r5 << 11) | (g6 << 5) | b5
+            out[idx] = (value >> 8) & 0xFF  # HI
+            out[idx + 1] = value & 0xFF    # LO
+            idx += 2
+
+    return bytes(out)

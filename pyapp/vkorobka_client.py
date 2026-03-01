@@ -35,6 +35,12 @@ class VkorobkaClient:
         self.pending_responses: Dict[str, Dict] = {}
         self.response_lock = threading.Lock()
         
+        # Словарь для ожидания подтверждений чанков (chunk_ack_key -> received)
+        # chunk_ack_key = f"{test_id}:{chunk_index}" для текущего потока
+        self.pending_chunk_acks: Dict[str, bool] = {}
+        # Текущий test_id для потока (для сопоставления подтверждений)
+        self.current_stream_test_id: Optional[str] = None
+        
         # Флаг для остановки потока приема
         self.running = True
         
@@ -95,7 +101,51 @@ class VkorobkaClient:
     
     def _handle_response(self, message: Dict):
         """Обработка полученного ответа"""
-        # Проверяем наличие test_id для сопоставления с запросом
+        # Проверяем, является ли это подтверждением чанка (CHUNK_ACK)
+        # Payload в JSON всегда base64-кодирован, нужно декодировать
+        payload_b64 = message.get('payload', '')
+        if payload_b64:
+            try:
+                import base64
+                payload_bytes = base64.b64decode(payload_b64)
+                payload_decoded = payload_bytes.decode('utf-8', errors='ignore')
+                if payload_decoded.startswith('CHUNK_ACK:'):
+                    # Это подтверждение чанка
+                    try:
+                        chunk_index_str = payload_decoded.split(':')[1]
+                        chunk_index = int(chunk_index_str)
+                        seq = message.get('seq', -1)
+                        
+                        # Используем текущий test_id из потока или ищем по chunk_index
+                        with self.response_lock:
+                            found = False
+                            # Сначала пробуем найти по текущему test_id
+                            if self.current_stream_test_id:
+                                chunk_ack_key = f"{self.current_stream_test_id}:{chunk_index}"
+                                if chunk_ack_key in self.pending_chunk_acks:
+                                    self.pending_chunk_acks[chunk_ack_key] = True
+                                    print(f"[client] [CHUNK_ACK] Получено подтверждение для чанка {chunk_index} (test_id={self.current_stream_test_id}, seq={seq})")
+                                    found = True
+                            
+                            # Если не нашли, ищем любой ключ с таким chunk_index
+                            if not found:
+                                for key in list(self.pending_chunk_acks.keys()):
+                                    if key.endswith(f":{chunk_index}"):
+                                        self.pending_chunk_acks[key] = True
+                                        print(f"[client] [CHUNK_ACK] Получено подтверждение для чанка {chunk_index} (key={key}, seq={seq})")
+                                        found = True
+                                        break
+                            
+                            if not found:
+                                print(f"[client] [CHUNK_ACK] Неожиданное подтверждение для чанка {chunk_index} (seq={seq})")
+                    except (ValueError, IndexError) as e:
+                        print(f"[client] [CHUNK_ACK] Ошибка парсинга CHUNK_ACK: {e}, payload={payload_decoded}")
+                    return
+            except Exception as e:
+                # Если не удалось декодировать - это не CHUNK_ACK, продолжаем обычную обработку
+                pass
+        
+        # Обычная обработка ответа по test_id
         test_id = message.get('test_id')
         
         print(f"[client] [HANDLE] Обработка ответа с test_id={test_id}")
@@ -158,6 +208,186 @@ class VkorobkaClient:
         print(f"[client] Отправлено сообщение test_id={test_id} для destination={destination}, размер={len(image_data)} байт")
         
         return test_id
+
+    # --- Новый API для потоковой передачи кадров на дисплей ---
+
+    STREAM_ID_LCD_FRAME = 1
+
+    def _send_stream_chunk(
+        self,
+        destination: str,
+        stream_id: int,
+        seq: int,
+        chunk_payload_b64: str,
+        test_id: str,
+        extra_fields: Optional[dict] = None,
+    ) -> None:
+        """
+        Внутренний метод отправки одного STREAM-сообщения с base64-чанком.
+        """
+        message = {
+            "type": "stream",
+            "source": "external",
+            "destination": destination,
+            "priority": 128,
+            "stream_id": stream_id,
+            "payload": chunk_payload_b64,
+            "seq": seq,
+            "test_id": test_id,
+        }
+
+        if extra_fields:
+            message.update(extra_fields)
+
+        json_str = json.dumps(message)
+        self.sock.sendto(json_str.encode("utf-8"), (self.server_host, self.server_port))
+
+        print(
+            f"[client] [STREAM] Отправлен чанк seq={seq}, stream_id={stream_id}, "
+            f"base64_len={len(chunk_payload_b64)}"
+        )
+
+    def send_lcd_frame_rgb565(
+        self,
+        destination: str,
+        frame_bytes: bytes,
+        width: int,
+        height: int,
+        format_code: int = 1,
+        chunk_rows: int = 20,  # Количество строк в одном чанке (вместо размера в байтах)
+    ) -> Optional[Dict]:
+        """
+        Отправляет RGB565 кадр на дисплей через потоковые сообщения (STREAM).
+        Реализует потоковый вывод: чанки разбиваются по строкам и выводятся сразу на дисплей.
+
+        Кадр разбивается на чанки по строкам, каждый чанк содержит внутренний заголовок:
+        - u16 width
+        - u16 height
+        - u16 chunk_index
+        - u16 total_chunks
+        - u16 format_code
+        - u16 y_start          (начальная Y-координата для этого чанка)
+        - u16 height_chunk     (количество строк в этом чанке)
+        - затем данные чанка (RGB565 big-endian, height_chunk строк)
+
+        Args:
+            destination: Назначение ("esp32")
+            frame_bytes: Полный кадр в формате RGB565 big-endian (width*height*2 байт)
+            width: Ширина кадра в пикселях
+            height: Высота кадра в пикселях
+            format_code: Код формата (1 = RGB565_BE)
+            chunk_rows: Количество строк в одном чанке (по умолчанию 20)
+
+        Returns:
+            Ответное сообщение (Dict) либо None при таймауте/ошибке.
+        """
+        total_size = len(frame_bytes)
+        bytes_per_row = width * 2  # RGB565 = 2 байта на пиксель
+        header_size = 2 + 2 + 2 + 2 + 2 + 2 + 2  # 7 * u16 = 14 байт
+
+        if chunk_rows <= 0:
+            raise ValueError("chunk_rows must be positive")
+
+        if total_size != width * height * 2:
+            raise ValueError(f"frame_bytes size mismatch: expected {width * height * 2}, got {total_size}")
+
+        # Количество чанков (по строкам)
+        total_chunks = (height + chunk_rows - 1) // chunk_rows
+
+        test_id = str(uuid.uuid4())
+        with self.response_lock:
+            self.pending_responses[test_id] = {"_received": False}
+            self.current_stream_test_id = test_id  # Сохраняем для сопоставления подтверждений
+
+        print(
+            f"[client] [STREAM] Отправка кадра на {destination} (потоковый режим с подтверждениями): "
+            f"{width}x{height}, bytes={total_size}, chunks={total_chunks} (по {chunk_rows} строк)"
+        )
+
+        for chunk_index in range(total_chunks):
+            y_start = chunk_index * chunk_rows
+            height_chunk = min(chunk_rows, height - y_start)
+            
+            # Извлекаем данные для этого чанка (height_chunk строк)
+            chunk_data_start = y_start * bytes_per_row
+            chunk_data_end = (y_start + height_chunk) * bytes_per_row
+            chunk_data = frame_bytes[chunk_data_start:chunk_data_end]
+
+            # Внутренний заголовок в начале payload
+            inner = bytearray(header_size + len(chunk_data))
+
+            # u16 width
+            inner[0:2] = width.to_bytes(2, byteorder="little", signed=False)
+            # u16 height
+            inner[2:4] = height.to_bytes(2, byteorder="little", signed=False)
+            # u16 chunk_index
+            inner[4:6] = chunk_index.to_bytes(2, byteorder="little", signed=False)
+            # u16 total_chunks
+            inner[6:8] = total_chunks.to_bytes(2, byteorder="little", signed=False)
+            # u16 format_code
+            inner[8:10] = format_code.to_bytes(2, byteorder="little", signed=False)
+            # u16 y_start
+            inner[10:12] = y_start.to_bytes(2, byteorder="little", signed=False)
+            # u16 height_chunk
+            inner[12:14] = height_chunk.to_bytes(2, byteorder="little", signed=False)
+
+            # Данные чанка сразу после заголовка
+            inner[header_size:] = chunk_data
+
+            chunk_b64 = image_to_base64(bytes(inner))
+            
+            # Регистрируем ожидание подтверждения этого чанка
+            chunk_ack_key = f"{test_id}:{chunk_index}"
+            with self.response_lock:
+                self.pending_chunk_acks[chunk_ack_key] = False
+            
+            # Отправляем чанк
+            self._send_stream_chunk(
+                destination=destination,
+                stream_id=self.STREAM_ID_LCD_FRAME,
+                seq=chunk_index,
+                chunk_payload_b64=chunk_b64,
+                test_id=test_id,
+                extra_fields=None,
+            )
+            
+            # Ждём подтверждения приёма этого чанка (flow control)
+            print(f"[client] [STREAM] Ожидание подтверждения для чанка {chunk_index}...")
+            chunk_ack_timeout = 5.0  # 5 секунд на чанк
+            start_time = time.time()
+            ack_received = False
+            
+            while time.time() - start_time < chunk_ack_timeout:
+                with self.response_lock:
+                    if chunk_ack_key in self.pending_chunk_acks and self.pending_chunk_acks[chunk_ack_key]:
+                        ack_received = True
+                        del self.pending_chunk_acks[chunk_ack_key]
+                        break
+                time.sleep(0.05)  # Проверяем каждые 50 мс
+            
+            if not ack_received:
+                print(f"[client] [STREAM] ⚠️ Таймаут подтверждения для чанка {chunk_index}, продолжаем...")
+                with self.response_lock:
+                    if chunk_ack_key in self.pending_chunk_acks:
+                        del self.pending_chunk_acks[chunk_ack_key]
+            else:
+                print(f"[client] [STREAM] ✅ Подтверждение получено для чанка {chunk_index}")
+
+        print(
+            f"[client] [STREAM] Все чанки отправлены, ожидаем подтверждение (test_id={test_id})"
+        )
+
+        # Очищаем текущий test_id потока
+        with self.response_lock:
+            self.current_stream_test_id = None
+        
+        # Ждём финальное подтверждение (LCD_FRAME_OK)
+        response = self.wait_for_response(test_id, timeout=self.timeout)
+        if response is None:
+            print("[client] [STREAM] Не получено финальное подтверждение для LCD кадра")
+        else:
+            print(f"[client] [STREAM] Получен финальный ответ на LCD кадр: {response}")
+        return response
     
     def wait_for_response(self, test_id: str, timeout: Optional[float] = None) -> Optional[Dict]:
         """
