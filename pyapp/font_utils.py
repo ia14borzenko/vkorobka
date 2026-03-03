@@ -94,57 +94,68 @@ def generate_char_images(
     output_path = Path(output_dir)
     output_path.mkdir(parents=True, exist_ok=True)
     
-    # Загружаем шрифт
+    # Загружаем шрифт и настраиваем размер так, чтобы высота строки (ascent+descent)
+    # примерно совпадала с заданным char_height. Это будет наша высота line box.
     try:
-        # Пробуем разные размеры шрифта, чтобы получить нужную высоту
         font_size = char_height
         font = ImageFont.truetype(font_path, font_size)
-        
-        # Проверяем реальную высоту и корректируем, если нужно
-        test_img = Image.new('RGBA', (100, char_height * 2), (255, 255, 255, 0))
-        test_draw = ImageDraw.Draw(test_img)
-        test_bbox = test_draw.textbbox((0, 0), 'A', font=font)
-        actual_height = test_bbox[3] - test_bbox[1]
-        
-        if actual_height != char_height:
-            # Корректируем размер шрифта пропорционально
-            font_size = int(font_size * (char_height / actual_height))
-            font = ImageFont.truetype(font_path, font_size)
+
+        # Метрики шрифта: ascent (вверх от базовой линии), descent (вниз)
+        ascent, descent = font.getmetrics()
+        line_height = ascent + descent
+
+        # Подгоняем размер шрифта так, чтобы высота строки была близка к char_height
+        if line_height > 0 and line_height != char_height:
+            scale = char_height / float(line_height)
+            new_size = max(1, int(font_size * scale))
+            if new_size != font_size:
+                font_size = new_size
+                font = ImageFont.truetype(font_path, font_size)
+                ascent, descent = font.getmetrics()
+                line_height = ascent + descent
+
+        # Если по каким-то причинам метрики некорректны, fallback на char_height
+        if line_height <= 0:
+            line_height = char_height
     except Exception as e:
         raise ValueError(f"Не удалось загрузить шрифт из {font_path}: {e}")
     
     print(f"[font_utils] Генерация символов из шрифта {font_path}")
-    print(f"[font_utils] Высота символа: {char_height}px, размер шрифта: {font_size}")
+    print(f"[font_utils] Целевая высота строки: {char_height}px, фактическая высота строки: {line_height}px, размер шрифта: {font_size}")
     
     generated_count = 0
     
+    # Вспомогательное изображение для измерения ширины символов
+    measure_img = Image.new('RGBA', (512, line_height * 2), (255, 255, 255, 0))
+    measure_draw = ImageDraw.Draw(measure_img)
+    # Горизонтальный отступ не нужен, делаем плотный набор
+    padding_x = 0
+
     for char in chars_to_generate:
         try:
-            # Получаем размеры символа
-            test_img = Image.new('RGBA', (200, char_height * 2), (255, 255, 255, 0))
-            test_draw = ImageDraw.Draw(test_img)
-            bbox = test_draw.textbbox((0, 0), char, font=font)
-            
+            # Измеряем ширину символа по bounding box
+            bbox = measure_draw.textbbox((0, 0), char, font=font)
+            if not bbox:
+                continue
+
             char_width = bbox[2] - bbox[0]
-            char_height_actual = bbox[3] - bbox[1]
+            if char_width <= 0:
+                char_width = 1
             
-            # Создаем изображение с прозрачным фоном
-            # Добавляем небольшой отступ для символов, которые могут выходить за границы
-            padding = 2
-            img = Image.new('RGBA', (char_width + padding * 2, char_height + padding * 2), (255, 255, 255, 0))
+            # Создаем изображение строки фиксированной высоты (line box)
+            # и плотно подгоняем символ по горизонтали
+            img_width = char_width + padding_x * 2
+            img_height = line_height
+            img = Image.new('RGBA', (img_width, img_height), (255, 255, 255, 0))
             draw = ImageDraw.Draw(img)
-            
-            # Рисуем символ черным цветом
-            # Корректируем позицию, чтобы символ был по центру по вертикали
-            y_offset = (char_height + padding * 2 - char_height_actual) // 2 - bbox[1]
-            draw.text((padding, y_offset), char, fill=(0, 0, 0, 255), font=font)
-            
-            # Обрезаем изображение, убирая лишние прозрачные области
-            # Находим реальные границы символа
-            bbox_img = img.getbbox()
-            if bbox_img:
-                img = img.crop(bbox_img)
-            
+
+            # Смещаем текст так, чтобы левый край глифа приходился на x=0.
+            # bbox считали при рисовании в (0, 0), поэтому bbox[0] — левый
+            # отступ глифа. Компенсируем его.
+            text_x = padding_x - bbox[0]
+            text_y = 0
+            draw.text((text_x, text_y), char, fill=(0, 0, 0, 255), font=font)
+
             # Сохраняем PNG
             filename = get_char_filename(char)
             filepath = output_path / filename
