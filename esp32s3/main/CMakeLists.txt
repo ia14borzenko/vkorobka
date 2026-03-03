@@ -7,6 +7,11 @@ idf_component_register(
         "tcp.cpp"
         "message_bridge.cpp"
         "uart_bridge.cpp"
+        "texting.cpp"
+        "stream_handler.cpp"
+        "command_handler.cpp"
+        "console_input.cpp"
+        "message_dispatcher.cpp"
     INCLUDE_DIRS
         "."
     PRIV_REQUIRES

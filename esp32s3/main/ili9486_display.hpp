@@ -30,6 +30,14 @@ public:
     // height_chunk: количество строк для вывода
     // Используется для потокового вывода без накопления всего кадра в памяти.
     void drawRgb565Chunk(const uint8_t* data, uint16_t width, uint16_t y_start, uint16_t height_chunk);
+    
+    // Вывод символа (RGB565 изображение) в указанную позицию
+    // data: буфер с RGB565 данными символа (big-endian HI,LO)
+    // char_width: ширина символа в пикселях
+    // char_height: высота символа в пикселях
+    // x: X координата на экране
+    // y: Y координата на экране
+    void drawChar(const uint8_t* data, uint16_t char_width, uint16_t char_height, uint16_t x, uint16_t y);
 
 private:
     esp_lcd_panel_io_handle_t io_;

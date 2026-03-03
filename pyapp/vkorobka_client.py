@@ -519,6 +519,62 @@ class VkorobkaClient:
             print(f"[test] [DISCARD] Payload (первые 200 символов): {payload_b64[:200]}")
             return None
     
+    def send_command(self, destination: str, command: str, payload_data: Optional[Dict] = None, test_id: Optional[str] = None) -> str:
+        """
+        Отправляет команду на указанное назначение.
+        
+        Args:
+            destination: Назначение ("win", "esp32")
+            command: Текст команды (например, "TEXT_CLEAR", "TEXT_ADD")
+            payload_data: Дополнительные данные команды в виде словаря (опционально)
+            test_id: Уникальный ID команды (генерируется автоматически если не указан)
+        
+        Returns:
+            str: test_id для отслеживания ответа
+        """
+        if test_id is None:
+            test_id = str(uuid.uuid4())
+        
+        # Формируем payload команды
+        if payload_data:
+            # Если есть дополнительные данные, формируем JSON строку
+            command_payload = json.dumps({
+                "command": command,
+                **payload_data
+            }, ensure_ascii=False)
+        else:
+            # Просто текст команды
+            command_payload = command
+        
+        # Конвертируем в base64
+        command_b64 = image_to_base64(command_payload.encode('utf-8'))
+        
+        # Формируем JSON сообщение типа "command"
+        message = {
+            "type": "command",
+            "source": "external",
+            "destination": destination,
+            "priority": 128,
+            "stream_id": 0,
+            "payload": command_b64,
+            "seq": 0,
+            "test_id": test_id
+        }
+        
+        # Регистрируем ожидание ответа
+        with self.response_lock:
+            self.pending_responses[test_id] = {'_received': False}
+        
+        # Отправляем сообщение
+        json_str = json.dumps(message, ensure_ascii=False)
+        self.sock.sendto(json_str.encode('utf-8'), (self.server_host, self.server_port))
+        
+        print(f"[client] Отправлена команда '{command}' test_id={test_id} для destination={destination}")
+        if payload_data:
+            print(f"[client] Payload размер: {len(command_payload)} байт (base64: {len(command_b64)} символов)")
+        
+        return test_id
+    
     def close(self):
         """Закрывает соединение"""
         self.running = False
