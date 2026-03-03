@@ -6,6 +6,7 @@ import argparse
 from pathlib import Path
 from texting import TextingManager
 from vkorobka_client import VkorobkaClient
+from font_utils import generate_char_images, create_char_map, ALL_CHARS
 
 
 def main() -> int:
@@ -53,6 +54,12 @@ def main() -> int:
         type=str,
         default='fonts/font.ttf',
         help='Путь к TTF/OTF шрифту (по умолчанию: fonts/font.ttf)'
+    )
+
+    parser.add_argument(
+        '--regen-font',
+        action='store_true',
+        help='Полностью пересоздать изображения символов и карту символов перед работой'
     )
     
     # Параметры поля
@@ -176,6 +183,23 @@ def main() -> int:
     fonts_dir = font_path.parent
     chars_dir = fonts_dir / "chars"
     char_map_json = fonts_dir / "char_map.json"
+
+    # При необходимости полностью пересоздаём картинки и карту символов
+    if args.regen_font:
+        print("[font] Полная регенерация изображений символов и карты (по флагу --regen-font)...")
+        try:
+            generate_char_images(
+                font_path=str(font_path),
+                output_dir=str(chars_dir),
+                char_height=args.char_height,
+                chars_to_generate=ALL_CHARS,
+            )
+            create_char_map(str(chars_dir), str(char_map_json))
+            print("[font] Регенерация символов и карты завершена")
+        except Exception as e:
+            print(f"❌ Ошибка при регенерации символов: {e}")
+            client.close()
+            return 1
     
     # Создаем менеджер текстинга
     try:

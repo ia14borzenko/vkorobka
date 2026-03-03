@@ -8,8 +8,9 @@ from PIL import Image, ImageFont, ImageDraw
 
 
 # Набор символов для генерации
-CYRILLIC_UPPER = [chr(c) for c in range(0x0410, 0x0430)]  # А-Я
-CYRILLIC_LOWER = [chr(c) for c in range(0x0430, 0x0450)]  # а-я
+# Добавляем отдельно буквы Ё/ё, которые находятся вне основного диапазона А-Я/а-я
+CYRILLIC_UPPER = ['Ё'] + [chr(c) for c in range(0x0410, 0x0430)]  # Ё, А-Я
+CYRILLIC_LOWER = ['ё'] + [chr(c) for c in range(0x0430, 0x0450)]  # ё, а-я
 LATIN_UPPER = [chr(c) for c in range(0x0041, 0x005B)]  # A-Z
 LATIN_LOWER = [chr(c) for c in range(0x0061, 0x007B)]  # a-z
 DIGITS = [chr(c) for c in range(0x0030, 0x003A)]  # 0-9
@@ -57,86 +58,18 @@ ALL_CHARS = CYRILLIC_UPPER + CYRILLIC_LOWER + LATIN_UPPER + LATIN_LOWER + DIGITS
 def get_char_filename(char: str) -> str:
     """
     Получает имя файла для символа.
-    
+
+    Начиная с текущей версии, для всех символов используем их Unicode-код
+    в имени файла, чтобы гарантировать уникальность и избежать проблем
+    с регистром на файловых системах (например, Windows).
+
     Args:
         char: Символ (одна строка)
-    
+
     Returns:
-        str: Имя файла (например, "a.png", "0.png", "space.png")
+        str: Имя файла, например U0041.png для 'A', U0430.png для 'а', U0020.png для пробела.
     """
-    if char == ' ':
-        return 'space.png'
-    elif char == '.':
-        return 'dot.png'
-    elif char == ',':
-        return 'comma.png'
-    elif char == ':':
-        return 'colon.png'
-    elif char == ';':
-        return 'semicolon.png'
-    elif char == '!':
-        return 'exclamation.png'
-    elif char == '?':
-        return 'question.png'
-    elif char == '-':
-        return 'hyphen.png'
-    elif char == '—':
-        return 'emdash.png'
-    elif char == '–':
-        return 'endash.png'
-    elif char == '(':
-        return 'paren_open.png'
-    elif char == ')':
-        return 'paren_close.png'
-    elif char == '[':
-        return 'bracket_open.png'
-    elif char == ']':
-        return 'bracket_close.png'
-    elif char == '{':
-        return 'brace_open.png'
-    elif char == '}':
-        return 'brace_close.png'
-    elif char == '"':
-        return 'quote_double.png'
-    elif char == "'":
-        return 'quote_single.png'
-    elif char == '«':
-        return 'quote_open.png'
-    elif char == '»':
-        return 'quote_close.png'
-    elif char == '…':
-        return 'ellipsis.png'
-    elif char == '/':
-        return 'slash.png'
-    elif char == '\\':
-        return 'backslash.png'
-    elif char == '|':
-        return 'pipe.png'
-    elif char == '+':
-        return 'plus.png'
-    elif char == '=':
-        return 'equals.png'
-    elif char == '*':
-        return 'asterisk.png'
-    elif char == '%':
-        return 'percent.png'
-    elif char == '$':
-        return 'dollar.png'
-    elif char == '@':
-        return 'at.png'
-    elif char == '#':
-        return 'hash.png'
-    elif char == '&':
-        return 'ampersand.png'
-    elif char == '^':
-        return 'caret.png'
-    elif char == '~':
-        return 'tilde.png'
-    elif char == '`':
-        return 'backtick.png'
-    else:
-        # Для обычных символов используем сам символ
-        return f"{char}.png"
+    return f"U{ord(char):04X}.png"
 
 
 def generate_char_images(
@@ -397,14 +330,24 @@ def ensure_font_ready(font_path: str, chars_dir: str, char_map_json: str, char_h
     if not chars_path.exists() or not map_path.exists():
         need_generate = True
     else:
-        # Проверяем, есть ли все необходимые символы
+        # Проверяем, что все символы из ALL_CHARS присутствуют в маппинге
+        # и соответствующие файлы реально существуют
         with open(map_path, 'r', encoding='utf-8') as f:
             char_map = json.load(f)
         
+        # 1) проверяем существующие записи маппинга
         for unicode_code, filename in char_map.items():
             if not (chars_path / filename).exists():
                 need_generate = True
                 break
+        # 2) проверяем, что для каждого символа из ALL_CHARS есть запись и файл
+        if not need_generate:
+            for ch in ALL_CHARS:
+                unicode_code = f"U+{ord(ch):04X}"
+                filename = char_map.get(unicode_code)
+                if not filename or not (chars_path / filename).exists():
+                    need_generate = True
+                    break
     
     if need_generate:
         print(f"[font_utils] Генерация символов из шрифта {font_path}...")

@@ -60,6 +60,51 @@ static int parse_json_int(const char* field_name, const char* json_buf, int defa
     return result;
 }
 
+// Проверка пробельного символа (минимально необходимый набор)
+static bool is_space(u32 unicode) {
+    return (unicode == ' '  ||  // обычный пробел
+            unicode == '\t' ||  // табуляция
+            unicode == '\n' ||  // перевод строки
+            unicode == '\r');   // возврат каретки
+}
+
+// Декодирование одного UTF-8 символа с обновлением индекса
+static bool next_utf8_char(const char* text, u32 text_len, u32& index, u32& unicode_out) {
+    if (index >= text_len) {
+        return false;
+    }
+
+    unsigned char c = (unsigned char)text[index];
+
+    // ASCII
+    if ((c & 0x80) == 0) {
+        unicode_out = c;
+        index += 1;
+        return true;
+    }
+    // 2-байтовый UTF-8
+    else if ((c & 0xE0) == 0xC0) {
+        if (index + 1 >= text_len) return false;
+        unicode_out = ((c & 0x1F) << 6) |
+                      (text[index + 1] & 0x3F);
+        index += 2;
+        return true;
+    }
+    // 3-байтовый UTF-8 (в том числе кириллица)
+    else if ((c & 0xF0) == 0xE0) {
+        if (index + 2 >= text_len) return false;
+        unicode_out = ((c & 0x0F) << 12) |
+                      ((text[index + 1] & 0x3F) << 6) |
+                      (text[index + 2] & 0x3F);
+        index += 3;
+        return true;
+    }
+
+    // Неподдерживаемый формат - пропускаем байт
+    index += 1;
+    return false;
+}
+
 // Функция для поиска символа в буфере по Unicode коду
 static CharData* find_char_data(u32 unicode_code) {
     for (u16 i = 0; i < s_texting_state.chars_count; ++i) {
@@ -83,88 +128,153 @@ static void texting_render_task(void* pvParameters) {
     u16 cursor_x = s_texting_state.cursor_x;
     u16 cursor_y = s_texting_state.cursor_y;
     u16 line_index = s_texting_state.current_line_index;
+    const u16 line_height = s_texting_state.char_height + s_texting_state.line_spacing;
     
-    // Простой вывод текста посимвольно
-    for (u32 i = 0; i < s_texting_state.text_len; ++i) {
-        // Обработка UTF-8 символов
+    const char* text = s_texting_state.text;
+    const u32 text_len = s_texting_state.text_len;
+    u32 index = 0;
+    bool prev_was_space = true; // В начале текста считаем, что \"до\" был пробел
+    
+    // Вывод текста с учётом переноса по словам
+    while (index < text_len) {
+        u32 char_index = index;
         u32 unicode = 0;
-        unsigned char c = (unsigned char)s_texting_state.text[i];
-        
-        if ((c & 0x80) == 0) {
-            // ASCII символ (1 байт)
-            unicode = c;
-        } else if ((c & 0xE0) == 0xC0) {
-            // 2-байтовый UTF-8 символ
-            if (i + 1 < s_texting_state.text_len) {
-                unicode = ((c & 0x1F) << 6) | (s_texting_state.text[i + 1] & 0x3F);
-                i++; // Пропускаем следующий байт
-            } else {
-                continue; // Неполный символ
+        if (!next_utf8_char(text, text_len, index, unicode)) {
+            continue; // Пропускаем некорректные байты
+        }
+
+        bool isSpace = is_space(unicode);
+
+        // Если это начало слова (предыдущий символ был пробелом) — оцениваем ширину всего слова
+        if (!isSpace && prev_was_space) {
+            int word_width = 0;
+            u32 look_ahead_index = char_index;
+
+            // Считаем ширину последовательности непробельных символов
+            while (look_ahead_index < text_len) {
+                u32 ua = 0;
+                u32 tmp_index = look_ahead_index;
+                if (!next_utf8_char(text, text_len, tmp_index, ua)) {
+                    break;
+                }
+                if (is_space(ua)) {
+                    break;
+                }
+                CharData* cd = find_char_data(ua);
+                if (cd && cd->valid) {
+                    word_width += cd->width;
+                }
+                look_ahead_index = tmp_index;
             }
-        } else if ((c & 0xF0) == 0xE0) {
-            // 3-байтовый UTF-8 символ (кириллица)
-            if (i + 2 < s_texting_state.text_len) {
-                unicode = ((c & 0x0F) << 12) | 
-                         ((s_texting_state.text[i + 1] & 0x3F) << 6) |
-                         (s_texting_state.text[i + 2] & 0x3F);
-                i += 2; // Пропускаем следующие байты
-            } else {
-                continue; // Неполный символ
+
+            int remaining = (int)s_texting_state.field_width - (int)cursor_x;
+
+            // Если слово не помещается целиком в оставшееся место строки
+            if (word_width > remaining && word_width <= (int)s_texting_state.field_width) {
+                // Переходим на новую строку до печати этого слова
+                cursor_x = 0;
+                cursor_y += line_height;
+                line_index++;
+
+                // Обрабатываем переполнение по вертикали
+                if (line_index >= s_texting_state.max_lines) {
+                    s_lcd->fillRect(s_texting_state.field_x, s_texting_state.field_y,
+                                    s_texting_state.field_width, line_height, 0xFFFF);
+                    cursor_x = 0;
+                    cursor_y = 0;
+                    line_index = 0;
+                }
             }
-        } else {
-            // Неподдерживаемый формат или продолжение байта
-            continue;
         }
-        
-        // Ищем символ в буфере
-        CharData* char_data = find_char_data(unicode);
-        
-        if (!char_data || !char_data->valid) {
-            ESP_LOGW(TAG, "Char (U+%04X) not found, skipping", unicode);
-            continue;
-        }
-        
-        // Проверяем переполнение поля
-        if (line_index >= s_texting_state.max_lines) {
-            // Очищаем первую строку и начинаем заново
-            s_lcd->fillRect(s_texting_state.field_x, s_texting_state.field_y,
-                           s_texting_state.field_width, s_texting_state.char_height + s_texting_state.line_spacing,
-                           0xFFFF);
+
+        // Обработка символа переноса строки
+        if (unicode == '\n') {
             cursor_x = 0;
-            cursor_y = 0;
-            line_index = 0;
-        }
-        
-        // Проверяем, влезает ли символ в текущую строку
-        if (cursor_x + char_data->width > s_texting_state.field_width) {
-            // Переходим на следующую строку
-            cursor_x = 0;
-            cursor_y += s_texting_state.char_height + s_texting_state.line_spacing;
+            cursor_y += line_height;
             line_index++;
-            
+
             if (line_index >= s_texting_state.max_lines) {
-                // Очищаем первую строку
                 s_lcd->fillRect(s_texting_state.field_x, s_texting_state.field_y,
-                               s_texting_state.field_width, s_texting_state.char_height + s_texting_state.line_spacing,
-                               0xFFFF);
+                                s_texting_state.field_width, line_height, 0xFFFF);
                 cursor_x = 0;
                 cursor_y = 0;
                 line_index = 0;
             }
+
+            prev_was_space = true;
+
+            if (s_texting_state.typing_speed_ms > 0) {
+                vTaskDelay(pdMS_TO_TICKS(s_texting_state.typing_speed_ms));
+            }
+            continue;
         }
-        
-        // Вычисляем абсолютные координаты
+
+        // Ищем данные символа
+        CharData* char_data = find_char_data(unicode);
+
+        if (!char_data || !char_data->valid) {
+            ESP_LOGW(TAG, "Char (U+%04X) not found, skipping", unicode);
+            prev_was_space = isSpace;
+            continue;
+        }
+
+        // Проверяем переполнение поля по вертикали
+        if (line_index >= s_texting_state.max_lines) {
+            s_lcd->fillRect(s_texting_state.field_x, s_texting_state.field_y,
+                            s_texting_state.field_width, line_height, 0xFFFF);
+            cursor_x = 0;
+            cursor_y = 0;
+            line_index = 0;
+        }
+
+        // Если символ сам по себе шире строки — разрешаем посимвольный перенос (поведение как раньше)
+        if (char_data->width > s_texting_state.field_width) {
+            if (cursor_x + char_data->width > s_texting_state.field_width) {
+                cursor_x = 0;
+                cursor_y += line_height;
+                line_index++;
+
+                if (line_index >= s_texting_state.max_lines) {
+                    s_lcd->fillRect(s_texting_state.field_x, s_texting_state.field_y,
+                                    s_texting_state.field_width, line_height, 0xFFFF);
+                    cursor_x = 0;
+                    cursor_y = 0;
+                    line_index = 0;
+                }
+            }
+        } else {
+            // Обычный символ: дополнительная защита от выхода за правую границу
+            if (cursor_x + char_data->width > s_texting_state.field_width) {
+                cursor_x = 0;
+                cursor_y += line_height;
+                line_index++;
+
+                if (line_index >= s_texting_state.max_lines) {
+                    s_lcd->fillRect(s_texting_state.field_x, s_texting_state.field_y,
+                                    s_texting_state.field_width, line_height, 0xFFFF);
+                    cursor_x = 0;
+                    cursor_y = 0;
+                    line_index = 0;
+                }
+            }
+        }
+
+        // Вычисляем абсолютные координаты с выравниванием по нижнему краю строки
         u16 screen_x = s_texting_state.field_x + cursor_x;
-        u16 screen_y = s_texting_state.field_y + cursor_y;
-        
-        // Выводим символ
-        ESP_LOGI(TAG, "Drawing char U+%04X at (%u, %u), size=%ux%u", 
+        u16 v_offset = 0;
+        if (char_data->height < s_texting_state.char_height) {
+            v_offset = (u16)(s_texting_state.char_height - char_data->height);
+        }
+        u16 screen_y = s_texting_state.field_y + cursor_y + v_offset;
+
+        ESP_LOGI(TAG, "Drawing char U+%04X at (%u, %u), size=%ux%u",
                  unicode, screen_x, screen_y, char_data->width, char_data->height);
         s_lcd->drawChar(char_data->rgb565_data, char_data->width, char_data->height, screen_x, screen_y);
-        
+
         // Обновляем позицию курсора
         cursor_x += char_data->width;
-        
+        prev_was_space = isSpace;
+
         // Задержка между символами
         if (s_texting_state.typing_speed_ms > 0) {
             vTaskDelay(pdMS_TO_TICKS(s_texting_state.typing_speed_ms));
