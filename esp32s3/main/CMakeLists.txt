@@ -12,6 +12,7 @@ idf_component_register(
         "command_handler.cpp"
         "console_input.cpp"
         "message_dispatcher.cpp"
+        "mic_stream.cpp"
     INCLUDE_DIRS
         "."
     PRIV_REQUIRES
@@ -24,4 +25,5 @@ idf_component_register(
         esp_driver_gpio
         esp_lcd
         driver
+        esp_driver_i2s
 )

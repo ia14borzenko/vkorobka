@@ -15,6 +15,7 @@
 #include "command_handler.hpp"
 #include "console_input.hpp"
 #include "message_dispatcher.hpp"
+#include "mic_stream.hpp"
 #include <string.h>
 #include <stdlib.h>
 #include <assert.h>
@@ -116,6 +117,8 @@ static void app_init() {
         return;
     }
     ESP_LOGI(TAG, "TCP client started");
+
+    mic_stream_start();
     
     // Запускаем задачу для чтения консольного ввода
     console_input_init();

@@ -6,14 +6,20 @@ import json
 import threading
 import time
 import uuid
-from typing import Optional, Dict, Callable
+from typing import Optional, Dict, Callable, Any
 from image_utils import image_to_base64, base64_to_image
 
 
 class VkorobkaClient:
     """Клиент для коммуникации с win-x64 приложением через UDP"""
     
-    def __init__(self, server_host='127.0.0.1', server_port=1236, timeout=10.0):
+    def __init__(
+        self,
+        server_host='127.0.0.1',
+        server_port=1236,
+        timeout=10.0,
+        verbose_udp: bool = True,
+    ):
         """
         Инициализация клиента
         
@@ -21,10 +27,14 @@ class VkorobkaClient:
             server_host: IP адрес win-x64 приложения
             server_port: UDP порт (по умолчанию 1236)
             timeout: Таймаут ожидания ответа в секундах
+            verbose_udp: Подробный лог входящих UDP (для потоков лучше False)
         """
         self.server_host = server_host
         self.server_port = server_port
         self.timeout = timeout
+        self.verbose_udp = verbose_udp
+        # Обработчики MSG_TYPE_STREAM с ESP32 (stream_id -> callback)
+        self._stream_handlers: Dict[int, Callable[[Dict[str, Any]], None]] = {}
         
         # Создаем UDP сокет
         self.sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
@@ -49,6 +59,12 @@ class VkorobkaClient:
         self.receive_thread.start()
         
         print(f"[client] Инициализирован клиент для {server_host}:{server_port}")
+
+    def register_stream_handler(
+        self, stream_id: int, handler: Callable[[Dict[str, Any]], None]
+    ) -> None:
+        """Вызывать для потоковых сообщений type=stream, source=esp32 (например PCM с микрофона)."""
+        self._stream_handlers[stream_id] = handler
     
     def _receive_loop(self):
         """Цикл приема сообщений в отдельном потоке"""
@@ -56,27 +72,25 @@ class VkorobkaClient:
             try:
                 data, addr = self.sock.recvfrom(65507)  # Максимальный размер UDP пакета
                 
-                # Логирование полученных данных
-                print(f"[client] [RX] Получено {len(data)} байт от {addr[0]}:{addr[1]}")
-                if len(data) > 0:
-                    # Показываем первые 200 символов для отладки
-                    preview = data[:200].decode('utf-8', errors='ignore')
-                    print(f"[client] [RX] Превью данных (первые 200 символов): {preview}")
+                if self.verbose_udp:
+                    print(f"[client] [RX] Получено {len(data)} байт от {addr[0]}:{addr[1]}")
+                    if len(data) > 0:
+                        preview = data[:200].decode('utf-8', errors='ignore')
+                        print(f"[client] [RX] Превью данных (первые 200 символов): {preview}")
                 
                 try:
                     message = json.loads(data.decode('utf-8'))
-                    print(f"[client] [RX] JSON успешно распарсен:")
-                    print(f"[client] [RX]   type: {message.get('type', 'N/A')}")
-                    print(f"[client] [RX]   source: {message.get('source', 'N/A')}")
-                    print(f"[client] [RX]   destination: {message.get('destination', 'N/A')}")
-                    test_id_received = message.get('test_id', 'N/A')
-                    print(f"[client] [RX]   test_id: '{test_id_received}' (длина: {len(str(test_id_received))})")
-                    print(f"[client] [RX]   payload_len: {len(message.get('payload', ''))} символов (base64)")
-                    
-                    # Отладочный вывод: показываем все ключи и значения
-                    print(f"[client] [RX]   Все ключи в сообщении: {list(message.keys())}")
-                    if 'test_id' in message:
-                        print(f"[client] [RX]   test_id значение (repr): {repr(message['test_id'])}")
+                    if self.verbose_udp:
+                        print(f"[client] [RX] JSON успешно распарсен:")
+                        print(f"[client] [RX]   type: {message.get('type', 'N/A')}")
+                        print(f"[client] [RX]   source: {message.get('source', 'N/A')}")
+                        print(f"[client] [RX]   destination: {message.get('destination', 'N/A')}")
+                        test_id_received = message.get('test_id', 'N/A')
+                        print(f"[client] [RX]   test_id: '{test_id_received}' (длина: {len(str(test_id_received))})")
+                        print(f"[client] [RX]   payload_len: {len(message.get('payload', ''))} символов (base64)")
+                        print(f"[client] [RX]   Все ключи в сообщении: {list(message.keys())}")
+                        if 'test_id' in message:
+                            print(f"[client] [RX]   test_id значение (repr): {repr(message['test_id'])}")
                     
                     self._handle_response(message)
                 except json.JSONDecodeError as e:
@@ -109,6 +123,12 @@ class VkorobkaClient:
         - CHUNK_ACK используется для flow control - Python ждёт подтверждения перед отправкой следующего чанка
         - Финальный ответ LCD_FRAME_OK приходит с тем же test_id, что и все чанки
         """
+        if message.get('type') == 'stream' and message.get('source') == 'esp32':
+            sid = int(message.get('stream_id', 0))
+            if sid in self._stream_handlers:
+                self._stream_handlers[sid](message)
+                return
+
         # Проверяем, является ли это подтверждением чанка (CHUNK_ACK)
         # Payload в JSON всегда base64-кодирован, нужно декодировать
         payload_b64 = message.get('payload', '')

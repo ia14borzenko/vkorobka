@@ -116,6 +116,41 @@ void handle_new_message(const msg_header_t& header, const u8* payload, u32 paylo
                   header.destination_id == MSG_DST_ESP32 ? " (ESP32)" : " (LEGACY_STM32)") << std::endl;
     std::cout << "  Priority: " << static_cast<int>(header.priority) << std::endl;
     std::cout << "  Payload length: " << header.payload_len << " bytes" << std::endl;
+
+    // Поток PCM с микрофона (ESP32 -> EXTERNAL), не путать с RESPONSE / LCD
+    if (header.source_id == MSG_SRC_ESP32 && header.msg_type == MSG_TYPE_STREAM &&
+        header.destination_id == MSG_DST_EXTERNAL && payload && payload_len > 0 && g_udp_api && g_message_router)
+    {
+        std::string test_id;
+        std::string client_ip;
+        int client_port = 0;
+        {
+            std::lock_guard<std::mutex> lock(g_destination_to_test_id_mutex);
+            auto it = g_destination_to_test_id.find(MSG_DST_ESP32);
+            if (it != g_destination_to_test_id.end())
+                test_id = it->second;
+        }
+        if (!test_id.empty())
+        {
+            std::lock_guard<std::mutex> lock(g_test_clients_mutex);
+            auto it = g_test_clients.find(test_id);
+            if (it != g_test_clients.end())
+            {
+                client_ip = it->second.first;
+                client_port = it->second.second;
+            }
+        }
+        std::string json_str;
+        if (g_message_router->convert_binary_to_json(header, payload, payload_len, json_str, test_id))
+        {
+            if (!client_ip.empty() && client_port > 0)
+                g_udp_api->send_json_to(client_ip, client_port, json_str);
+            else
+                g_udp_api->send_json_to_all(json_str);
+            std::cout << ANSI_SUCC << "[app] ESP32 STREAM forwarded to UDP (e.g. mic PCM)" << ANSI_ENDL << std::endl;
+        }
+        return;
+    }
     
         // Обработка ответов от ESP32 (включая изображения)
         if (header.source_id == MSG_SRC_ESP32 && 

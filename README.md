@@ -641,3 +641,26 @@ from an ESP32‑S3 using the ESP‑IDF `esp_lcd` I80 (8080) interface.
   You can later remove or comment this macro to enable the existing Wi‑Fi/TCP code.
 - The ILI9486 is configured for **RGB565** (`0x3A = 0x55`) and display orientation (`0x36 = 0xE8`)
   to match a landscape layout: `(0,0)` is the top‑left corner, `(479,319)` is bottom‑right.
+
+
+## ESP32-S3 + INMP441 (draft readme section)
+
+INMP441 имеет высокое качество звука, низкий уровень шума и легко подключается к ESP32. Поскольку это цифровой микрофон, аналоговые помехи, характерные для традиционных микрофонов, здесь отсутствуют.
+
+Характеристики INMP441:
+
+Рабочее напряжение: 1,8–3,3 В
+Потребление: 1,4 мА
+Отношение сигнал/шум: 61 дБА
+Частота дискретизации: до 48 кГц
+Формат выходных данных: 24-бит I²С-compatible (режим I²S)
+
+К микроконтроллеру ESP32-S3 подключён модуль микрофона INMP441; управление по I2S (монозвук, L/R -> GND => Left channel).
+
+### Pins (ESP32‑S3 ↔ INMP441)
+
+| ESP32‑S3 GPIO | MIC pin  |
+|---------------|----------|
+| 35            | MIC_SD   |
+| 36            | MIC_WS   |
+| 37            | MIC_SCK  |

@@ -1,6 +1,7 @@
 #include "message_dispatcher.hpp"
 #include "command_handler.hpp"
 #include "stream_handler.hpp"
+#include "mic_stream.hpp"
 #include "message_bridge.hpp"
 #include "esp_log.h"
 #include "my_types.h"
@@ -52,6 +53,59 @@ void message_dispatcher_handle_new_message(const msg_header_t* header, const u8*
         }
     }
     
+    // voice.on / voice.off — до TEXTING (payload текстовый, не JSON)
+    if (header->source_id == MSG_SRC_EXTERNAL && header->destination_id == MSG_DST_ESP32 &&
+        header->msg_type == MSG_TYPE_COMMAND && payload && payload_len > 0)
+    {
+        char* vbuf = (char*)malloc(payload_len + 1);
+        if (vbuf)
+        {
+            memcpy(vbuf, payload, payload_len);
+            vbuf[payload_len] = '\0';
+            if (strcmp(vbuf, "voice.on") == 0)
+            {
+                free(vbuf);
+                mic_stream_set_tx_enabled(true);
+                if (g_message_bridge)
+                {
+                    const char* ack = "VOICE_ON_OK";
+                    msg_header_t rh = msg_create_header(
+                        MSG_TYPE_RESPONSE,
+                        MSG_SRC_ESP32,
+                        MSG_DST_EXTERNAL,
+                        128,
+                        0,
+                        (u32)strlen(ack),
+                        0,
+                        MSG_ROUTE_NONE);
+                    g_message_bridge->send_message(rh, reinterpret_cast<const u8*>(ack), (u32)strlen(ack));
+                }
+                return;
+            }
+            if (strcmp(vbuf, "voice.off") == 0)
+            {
+                free(vbuf);
+                mic_stream_set_tx_enabled(false);
+                if (g_message_bridge)
+                {
+                    const char* ack = "VOICE_OFF_OK";
+                    msg_header_t rh = msg_create_header(
+                        MSG_TYPE_RESPONSE,
+                        MSG_SRC_ESP32,
+                        MSG_DST_EXTERNAL,
+                        128,
+                        0,
+                        (u32)strlen(ack),
+                        0,
+                        MSG_ROUTE_NONE);
+                    g_message_bridge->send_message(rh, reinterpret_cast<const u8*>(ack), (u32)strlen(ack));
+                }
+                return;
+            }
+            free(vbuf);
+        }
+    }
+
     // Обработка команд текстинга от pyapp (EXTERNAL source)
     if (header->source_id == MSG_SRC_EXTERNAL && header->destination_id == MSG_DST_ESP32 && 
         header->msg_type == MSG_TYPE_COMMAND && payload && payload_len > 0 && s_lcd)
