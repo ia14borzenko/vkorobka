@@ -4,10 +4,11 @@
 
 Команды:
   voice.on   — отправить voice.on на ESP32, начать накопление сэмплов
-  voice.off  — отправить voice.off, остановить приём, сохранить FLAC + TSV отсчётов
+  voice.off  — отправить voice.off, остановить приём, сохранить FLAC + WAV + TSV отсчётов
   quit       — выход (без сохранения, если не было voice.off)
 
-Формат потока: 48 kHz, 24-bit LE (заголовок 8 байт + PCM).
+Аудио в файлы пишется как float в [-1, 1]: int24 / 2**23, int16 / 2**15 (как в convert.py),
+чтобы плееры корректно интерпретировали уровень.
 
 Запуск:
   python voice_cli.py --host 127.0.0.1 --port 1236 -o capture.flac
@@ -22,7 +23,7 @@ import struct
 import sys
 import threading
 from pathlib import Path
-from typing import Any, Dict, List, Tuple, Union
+from typing import Any, Dict, List, Optional, Tuple, Union
 
 from vkorobka_client import VkorobkaClient
 
@@ -64,14 +65,30 @@ def parse_mic_stream_payload(payload_b64: str) -> Tuple[int, Union[array.array, 
     return int(sample_rate), samples, 16
 
 
-def save_audio_flac_or_wav(
-    path: Path,
+def int_samples_to_float_audio(samples: Any, bits: int) -> tuple[Any, str]:
+    """
+    Как в convert.py: целые отсчёты → float для soundfile (пики в пределах ~±1).
+    24-bit: делим на 2**23; 16-bit: на 2**15.
+    """
+    import numpy as np
+
+    raw = np.asarray(samples, dtype=np.float64)
+    if bits == 24:
+        return raw / (2**23), "PCM_24"
+    return raw / (2**15), "PCM_16"
+
+
+def save_audio_flac_and_wav(
+    flac_path: Path,
+    wav_path: Path,
     samples: Union[array.array, Any],
     sample_rate: int,
     bits: int,
-) -> Path:
+) -> tuple[Optional[Path], Path]:
+    """
+    Пишет FLAC и WAV из одной нормализованной float-последовательности (как convert.py для WAV).
+    """
     try:
-        import numpy as np
         import soundfile as sf
     except ImportError as e:
         print(
@@ -80,22 +97,18 @@ def save_audio_flac_or_wav(
         )
         raise e
 
-    path = path.expanduser()
-    data = np.asarray(samples)
-    if bits == 24:
-        data = data.astype(np.int32, copy=False)
-        subtype = "PCM_24"
-    else:
-        data = data.astype(np.int16, copy=False)
-        subtype = "PCM_16"
+    flac_path = flac_path.expanduser()
+    wav_path = wav_path.expanduser()
+    audio_f, subtype = int_samples_to_float_audio(samples, bits)
+
+    sf.write(str(wav_path), audio_f, sample_rate, subtype=subtype)
+
     try:
-        sf.write(str(path), data, sample_rate, format="FLAC", subtype=subtype)
-        return path
+        sf.write(str(flac_path), audio_f, sample_rate, format="FLAC", subtype=subtype)
+        return flac_path, wav_path
     except Exception as e:
-        wav_path = path.with_suffix(".wav")
-        print(f"[voice] FLAC недоступен ({e}), пишем WAV: {wav_path}")
-        sf.write(str(wav_path), data, sample_rate, subtype=subtype)
-        return wav_path
+        print(f"[voice] FLAC недоступен ({e}), оставлен только WAV", file=sys.stderr)
+        return None, wav_path
 
 
 def write_samples_table(path: Path, samples: Any, bits: int) -> None:
@@ -168,8 +181,11 @@ def main() -> int:
     if table_path is None:
         table_path = args.output.with_name(args.output.stem + "_samples.tsv")
 
+    wav_path = args.output.with_suffix(".wav")
+
     print("Команды: voice.on | voice.off | quit")
     print(f"FLAC: {args.output.resolve()}")
+    print(f"WAV:  {wav_path.resolve()} (нормализация как convert.py)")
     print(f"TSV:  {table_path.resolve()}")
 
     try:
@@ -228,9 +244,15 @@ def main() -> int:
                 if n == 0:
                     print("[voice] Нет сэмплов — файлы не созданы")
                     continue
-                out = save_audio_flac_or_wav(args.output, merged, sr, br)
+                out_flac, out_wav = save_audio_flac_and_wav(
+                    args.output, wav_path, merged, sr, br
+                )
                 write_samples_table(table_path, merged, br)
-                print(f"[voice] FLAC: {out.resolve()} ({n} samples, {sr} Hz, {br}-bit)")
+                if out_flac is not None:
+                    print(
+                        f"[voice] FLAC: {out_flac.resolve()} ({n} samples, {sr} Hz, {br}-bit)"
+                    )
+                print(f"[voice] WAV:  {out_wav.resolve()}")
                 print(f"[voice] TSV:  {table_path.resolve()}")
                 continue
 
