@@ -24,6 +24,24 @@ static constexpr size_t MIC_RAW_INT32_PER_READ =
     MIC_MONO_SAMPLES_PER_PACKET * 2;
 static constexpr size_t BYTES_PER_SAMPLE = 3;  // 24-bit packed LE
 
+// +3 dB по амплитуде: × 10^(3/20) ≈ 1.412538 (целочисленно, без libm)
+static constexpr s64 MIC_GAIN_NUM = 1412538;
+static constexpr s64 MIC_GAIN_DEN = 1000000;
+
+static int32_t apply_mic_gain_s24(int32_t s24)
+{
+    s64 y = (s64)s24 * MIC_GAIN_NUM / MIC_GAIN_DEN;
+    if (y > 0x7fffff)
+    {
+        y = 0x7fffff;
+    }
+    if (y < -0x800000)
+    {
+        y = -0x800000;
+    }
+    return (int32_t)y;
+}
+
 static void pack_i24_le(int32_t s24, uint8_t* p)
 {
     if (s24 > 0x7fffff)
@@ -159,7 +177,7 @@ static void mic_stream_task(void* arg)
         {
             const int32_t left = raw[2 * f];
             const int32_t s24 = i32_slot_to_s24(left);
-            pack_i24_le(s24, pcm24 + f * BYTES_PER_SAMPLE);
+            pack_i24_le(apply_mic_gain_s24(s24), pcm24 + f * BYTES_PER_SAMPLE);
         }
 
         MicPcmStreamHeader* hdr = (MicPcmStreamHeader*)payload;
