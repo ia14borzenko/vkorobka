@@ -2,6 +2,11 @@
 #include <iostream>
 #include <sstream>
 
+// mstcpip.h не везде подключается до SIO_UDP_CONNRESET; значение из Windows SDK (WSAIoctl).
+#ifndef SIO_UDP_CONNRESET
+#define SIO_UDP_CONNRESET 0x9800000C
+#endif
+
 udp_api_t::udp_api_t(std::atomic<bool>* g_running_p, int port)
     : g_running(g_running_p)
     , sock(INVALID_SOCKET)
@@ -75,6 +80,16 @@ int udp_api_t::udp_init()
     // Неблокирующий режим
     u_long mode = 1;
     ioctlsocket(sock, FIONBIO, &mode);
+
+    // После sendto на «мёртвый» UDP-порт Windows шлёт ICMP port unreachable; без этого
+    // последующие recvfrom часто дают WSAECONNRESET (10054) и засыпают приём.
+    BOOL udp_no_connreset = FALSE;
+    DWORD ioctl_bytes = 0;
+    if (WSAIoctl(sock, SIO_UDP_CONNRESET, &udp_no_connreset, sizeof(udp_no_connreset),
+                 nullptr, 0, &ioctl_bytes, nullptr, nullptr) == SOCKET_ERROR)
+    {
+        std::cerr << "[udp] WSAIoctl(SIO_UDP_CONNRESET) failed: " << WSAGetLastError() << "\n";
+    }
     
     std::cout << "[udp] UDP server started on port " << listen_port << "\n";
     return 0;
@@ -93,10 +108,11 @@ void udp_api_t::run()
 {
     char buffer[65507]; // Максимальный размер UDP пакета
     sockaddr_in from_addr{};
-    int from_len = sizeof(from_addr);
     
     while (g_running && g_running->load())
     {
+        // Обязательно на каждой итерации: иначе recvfrom на Windows даёт нестабильное поведение.
+        int from_len = sizeof(from_addr);
         int len = recvfrom(sock, buffer, sizeof(buffer), 0, 
                           (sockaddr*)&from_addr, &from_len);
         
@@ -123,7 +139,16 @@ void udp_api_t::run()
         else if (len == SOCKET_ERROR)
         {
             int err = WSAGetLastError();
-            if (err != WSAEWOULDBLOCK)
+            if (err == WSAEWOULDBLOCK)
+            {
+                // норма для неблокирующего сокета
+            }
+            else if (err == WSAECONNRESET)
+            {
+                // Часто следует за sendto на закрытый порт при рассылке всем клиентам;
+                // не спим — иначе приём UDP фактически останавливается на секунды.
+            }
+            else
             {
                 std::cerr << "[udp] recvfrom error: " << err << "\n";
                 std::this_thread::sleep_for(std::chrono::milliseconds(100));
@@ -137,7 +162,7 @@ void udp_api_t::run()
     std::cout << "[udp] UDP server stopped\n";
 }
 
-bool udp_api_t::send_json_to(const std::string& ip, int port, const std::string& json_str)
+bool udp_api_t::send_json_to(const std::string& ip, int port, const std::string& json_str, int* out_wsa_error)
 {
     if (sock == INVALID_SOCKET)
     {
@@ -159,7 +184,12 @@ bool udp_api_t::send_json_to(const std::string& ip, int port, const std::string&
     
     if (sent == SOCKET_ERROR)
     {
-        std::cerr << "[udp] sendto failed: " << WSAGetLastError() << "\n";
+        int err = WSAGetLastError();
+        if (out_wsa_error)
+        {
+            *out_wsa_error = err;
+        }
+        std::cerr << "[udp] sendto failed: " << err << "\n";
         return false;
     }
     
@@ -171,15 +201,28 @@ bool udp_api_t::send_json_to_all(const std::string& json_str)
     std::lock_guard<std::mutex> lock(clients_mutex_);
     
     bool all_sent = true;
-    for (const auto& client : clients_)
+    for (auto it = clients_.begin(); it != clients_.end(); )
     {
         char ip[INET_ADDRSTRLEN];
-        inet_ntop(AF_INET, &client.second.sin_addr, ip, sizeof(ip));
-        int port = ntohs(client.second.sin_port);
+        inet_ntop(AF_INET, &it->second.sin_addr, ip, sizeof(ip));
+        int port = ntohs(it->second.sin_port);
         
-        if (!send_json_to(ip, port, json_str))
+        int wsa = 0;
+        if (!send_json_to(ip, port, json_str, &wsa))
         {
             all_sent = false;
+            // Не удаляем живого клиента из‑за переполнения исходящего буфера (неблокирующий UDP).
+            if (wsa == WSAEWOULDBLOCK)
+            {
+                ++it;
+                continue;
+            }
+            std::cerr << "[udp] send_json_to failed (wsa=" << wsa << "), dropping client " << it->first << "\n";
+            it = clients_.erase(it);
+        }
+        else
+        {
+            ++it;
         }
     }
     

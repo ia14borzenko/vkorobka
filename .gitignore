@@ -40,3 +40,7 @@ pyapp\__pycache__\
 *.pyc
 
 pyapp/fonts
+
+*.tsv
+*.wav
+*.flac

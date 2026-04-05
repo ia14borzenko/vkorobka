@@ -27,8 +27,8 @@ public:
     bool start();
     void stop();
 
-    // Отправка JSON сообщения на указанный адрес
-    bool send_json_to(const std::string& ip, int port, const std::string& json_str);
+    // Отправка JSON сообщения на указанный адрес (при ошибке в *out_wsa_error — код WSA, иначе не трогать)
+    bool send_json_to(const std::string& ip, int port, const std::string& json_str, int* out_wsa_error = nullptr);
 
     // Отправка JSON сообщения всем зарегистрированным клиентам
     bool send_json_to_all(const std::string& json_str);
