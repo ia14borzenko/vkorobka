@@ -13,6 +13,7 @@ idf_component_register(
         "console_input.cpp"
         "message_dispatcher.cpp"
         "mic_stream.cpp"
+        "dyn_playback.cpp"
     INCLUDE_DIRS
         "."
     PRIV_REQUIRES

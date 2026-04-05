@@ -3,6 +3,8 @@
 #include "ili9486_display.hpp"
 #include "my_types.h"
 
+constexpr u16 LCD_STREAM_ID_FRAME = 1;
+
 // Структура для хранения одного чанка в буфере
 struct LcdChunk
 {

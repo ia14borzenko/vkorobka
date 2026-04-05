@@ -664,3 +664,100 @@ INMP441 имеет высокое качество звука, низкий ур
 | 35            | MIC_SD   |
 | 36            | MIC_WS   |
 | 37            | MIC_SCK  |
+
+## ESP32-S3 + MAX98357A (draft readme section)
+
+The MAX98357A/MAX98357B are digital PCM input
+Class D power amplifiers. The MAX98357A accepts standard I2S data through DIN, BCLK, and LRCLK while the
+MAX98357B accepts left-justified data through the same
+inputs. Both versions also accept 16-bit or 32-bit TDM
+data with up to eight slots. The digital audio interface
+eliminates the need for an external MCLK signal that is
+typically required for I2S data transmission.
+SD_MODE selects which data word is output by the
+amplifier and is used to put the ICs into shutdown. These
+devices offer five gain settings in I2S/left-justified mode
+and a fixed 12dB gain in TDM mode. Channel selection in
+TDM mode is set with the combination of SD_MODE and
+GAIN_SLOT (Table 7).
+The MAX98357A/MAX98357B DAI includes a DC blocker
+with a -3dB cutoff at 3.7Hz.
+The MAX98357A/MAX98357B feature low-quiescent current, comprehensive click-and-pop suppression, and
+excellent RF immunity. The ICs offer Class AB audio
+performance with Class D efficiency in a minimal boardspace solution. The Class D amplifier features spreadspectrum modulation with edge-rate and overshoot control circuitry that offers significant improvements in switchmode amplifier radiated emissions. The amplifier features
+click-and-pop suppression that reduces audible transients
+on startup and shutdown. The amplifier includes thermaloverload and short-circuit protection.
+Digital Audio Interface Modes
+The input stage of the digital audio interface is highly flexible, supporting 8kHz–96kHz sampling rates with 16/24/32-
+bit resolution for I2S/left justified data as well as up to a
+8-slot, 16-bit or 32-bit time division multiplexed (TDM)
+format. When LRCLK has a 50% duty cycle the data
+format is determined by the part number selection
+(MAX98357A/MAX98357B). When a frame sync pulse
+is used for the LRCLK the data format is automatically
+configured in TDM mode. The frame sync pulse indicates
+the beginning of the first time slot.
+MCLK Elimination
+The ICs eliminate the need for the external MCLK
+signal that is typically used for PCM communication.
+This reduces EMI and possible board coupling issues in
+addition to reducing the size and pin-count of the ICs.
+BCLK Jitter Tolerance
+The ICs feature a BCLK jitter tolerance of 0.5ns for RMS
+jitter below 40kHz and 12ns for wideband RMS jitter while
+maintaining a dynamic range greater than 98dB (Table 1).
+BCLK Polarity
+When operating in I2S/left-justified mode, incoming serial
+data is always clocked-in on the rising edge of BCLK.
+In TDM mode, the MAX98357A clocks-in serial data on
+the rising edge of BCLK while the MAX98357B clocks in
+serial data on the falling edge of BCLK (Table 2).
+LRCLK Polarity
+LRCLK specifies whether left-channel data or rightchannel data is currently being read by the digital audio
+interface. The MAX98357A indicates the left channel
+word when LRCLK is low, and the MAX98357B indicates
+the left channel word when LRCLK is high (Table 3).
+LRCLK ONLY supports 8kHz, 16kHz, 32kHz, 44.1kHz,
+48kHz, 88.2kHz and 96kHz frequencies. LRCLK clocks
+at 11.025kHz, 12kHz, 22.05kHz and 24kHz are NOT supported. Do not remove LRCLK while BCLK is present.
+Removing LRCLK while BCLK is present can cause unexpected output behavior including a large DC output voltage.
+Standby Mode
+The ICs automatically enter standby mode when BCLK
+is removed. If BCLK stops toggling, the ICs automatically
+
+FUNCTIONAL PIN DESCRIPTION
+
+-------+-----------+---------------------------------------------------------------------------------------------
+ TQFN  | NAME      | FUNCTION                                                                                    
+-------+-----------+---------------------------------------------------------------------------------------------
+ 4     | SD_MODE   | Shutdown and Channel Select. Pull SD_MODE low to place the device in shutdown.             
+       |           | In I2S or LJ mode, SD_MODE selects the data channel (Table 5).                              
+       |           | In TDM mode, SD_MODE and GAIN_SLOT are both used for channel selection (Table 7).          
+-------+-----------+---------------------------------------------------------------------------------------------
+ 1     | DIN       | Digital Input Signal                                                                        
+-------+-----------+---------------------------------------------------------------------------------------------
+ 2     | GAIN_SLOT | Gain and Channel Selection. In I2S and LJ mode determines amplifier output gain (Table 8).
+       |           | In TDM mode, used for channel selection with SD_MODE (Table 7).                            
+       |           | In TDM mode, gain is fixed at 12 dB.                                                        
+-------+-----------+---------------------------------------------------------------------------------------------
+ 16    | BCLK      | Bit Clock Input                                                                             
+-------+-----------+---------------------------------------------------------------------------------------------
+ 14    | LRCLK     | Frame Clock. Left/right clock for I2S and LJ mode.                                          
+       |           | Sync clock for TDM mode.                                                                    
+-------+-----------+---------------------------------------------------------------------------------------------
+
+### Pins (ESP32‑S3 ↔ MAX98357A)
+
+| ESP32‑S3 GPIO | DYN pin      |
+|---------------|--------------|
+| 39            | DYN_LRCK     |
+| 40            | DYN_BCLK     |
+| 41            | DYN_DIN      |
+| 42            | DYN_SD_MODE  |
+| 3.3V          | DYN_GAIN_SL  |
+
+Потоковое воспроизведение по TCP (протокол как у uplink микрофона, см. `mic_stream.cpp`):
+
+- Команды `MSG_TYPE_COMMAND`, источник `EXTERNAL`, назначение `ESP32`, текстовый payload: **`dyn.on`** — включить приём PCM и вывести `SD_MODE` из shutdown; **`dyn.off`** — выключить, дренировать очередь, короткая тишина на I2S. Ответы: `DYN_ON_OK` / `DYN_OFF_OK`.
+- Поток: **`MSG_TYPE_STREAM`**, `stream_id = 3`, тот же бинарный payload, что шлёт микрофон при `stream_id = 2`: заголовок 8 байт (`sample_rate_hz` u32 = 48000, `sample_count` u16, `bits_per_sample` u16 = 24), далее моно PCM **24-bit little-endian** (3 байта на сэмпл), до 512 сэмплов на пакет. Пока не отправлен `dyn.on`, пакеты `stream_id = 3` игнорируются.
+- В прошивке ESP32-S3 микрофон (RX) привязан к **I2S0**, усилитель (TX) — к **I2S1**, чтобы не делить один контроллер (иначе возможны треск и предупреждение `i2s controller 0 has been occupied`).

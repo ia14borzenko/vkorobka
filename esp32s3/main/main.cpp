@@ -16,6 +16,7 @@
 #include "console_input.hpp"
 #include "message_dispatcher.hpp"
 #include "mic_stream.hpp"
+#include "dyn_playback.hpp"
 #include <string.h>
 #include <stdlib.h>
 #include <assert.h>
@@ -119,7 +120,8 @@ static void app_init() {
     ESP_LOGI(TAG, "TCP client started");
 
     mic_stream_start();
-    
+    dyn_playback_init();
+
     // Запускаем задачу для чтения консольного ввода
     console_input_init();
 #else

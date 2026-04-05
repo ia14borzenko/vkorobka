@@ -37,7 +37,8 @@ bool tcp_t::start(void)
         return true;
     }
 
-    BaseType_t ret = xTaskCreate(tcp_client_task, "tcp_client", 8192, this, 5, &task_handle);
+    // Выше приоритета mic_stream/dyn_playback — быстрее drain TCP при потоке PCM
+    BaseType_t ret = xTaskCreate(tcp_client_task, "tcp_client", 8192, this, 10, &task_handle);
     if (ret != pdPASS)
     {
         ESP_LOGE(TAG, "Failed to create TCP client task");
@@ -175,7 +176,7 @@ void tcp_t::process_rx_buffer(void)
                                       static_cast<u32>(rx_buffer.size()), 
                                       &header, &payload, &payload_len);
         
-        ESP_LOGI(TAG, "[DEBUG] TCP unpack: result=%d, payload_len=%u, header.payload_len=%u", 
+        ESP_LOGD(TAG, "[DEBUG] TCP unpack: result=%d, payload_len=%u, header.payload_len=%u",
                  unpack_result, payload_len, header.payload_len);
         
         if (unpack_result)
@@ -183,10 +184,9 @@ void tcp_t::process_rx_buffer(void)
             // Проверяем, есть ли полный пакет
             u32 expected_total = MSG_HEADER_LEN + payload_len;
             
-            ESP_LOGI(TAG, "[DEBUG] TCP: expected_total=%u, rx_buffer.size()=%zu", 
-                     expected_total, rx_buffer.size());
-            
-            // Отладочный вывод: показываем байты заголовка
+            ESP_LOGD(TAG, "[DEBUG] TCP: expected_total=%u, rx_buffer.size()=%zu", expected_total,
+                     rx_buffer.size());
+
             if (rx_buffer.size() >= MSG_HEADER_LEN)
             {
                 char hex_buf[64];
@@ -195,9 +195,9 @@ void tcp_t::process_rx_buffer(void)
                 {
                     hex_len += sprintf(hex_buf + hex_len, "%02X ", rx_buffer[i]);
                 }
-                ESP_LOGI(TAG, "[DEBUG] TCP header bytes: %s", hex_buf);
-                ESP_LOGI(TAG, "[DEBUG] TCP payload_len bytes [7-10]: %02X %02X %02X %02X", 
-                         rx_buffer[7], rx_buffer[8], rx_buffer[9], rx_buffer[10]);
+                ESP_LOGD(TAG, "[DEBUG] TCP header bytes: %s", hex_buf);
+                ESP_LOGD(TAG, "[DEBUG] TCP payload_len bytes [7-10]: %02X %02X %02X %02X", rx_buffer[7],
+                         rx_buffer[8], rx_buffer[9], rx_buffer[10]);
             }
             
             if (rx_buffer.size() >= expected_total)
@@ -243,15 +243,16 @@ void tcp_t::process_rx_buffer(void)
                 
                 if (header_looks_valid && rx_buffer.size() < expected_total)
                 {
-                    // Заголовок выглядит валидным, но данных недостаточно - ждем
-                    ESP_LOGI(TAG, "Valid header detected, waiting for more data (have %zu, need %u)", 
+                    ESP_LOGD(TAG, "Valid header detected, waiting for more data (have %zu, need %u)",
                              rx_buffer.size(), expected_total);
-                    break;  // Выходим из цикла, чтобы дождаться больше данных
+                    break;
                 }
                 else if (header_looks_valid && rx_buffer.size() >= expected_total)
                 {
-                    // Заголовок валиден и данных достаточно, но unpack не прошел - странно
-                    // Попробуем еще раз распарсить
+                    ESP_LOGW(TAG,
+                             "msg_unpack failed but manual header OK; skip 1 byte to resync (had %zu)",
+                             rx_buffer.size());
+                    rx_buffer.erase(rx_buffer.begin(), rx_buffer.begin() + 1);
                     continue;
                 }
                 else
@@ -355,7 +356,7 @@ void tcp_t::tcp_client_task(void* pvParameters)
                     
                     if (FD_ISSET(tcp->sock, &readfds))
                     {
-                        ESP_LOGI(TAG, "Data available on socket, reading...");
+                        ESP_LOGD(TAG, "Data available on socket, reading...");
                         read_and_process_data(tcp, rx_raw);
                     }
                 }
@@ -367,7 +368,7 @@ void tcp_t::tcp_client_task(void* pvParameters)
                 }
                 // ret == 0 означает timeout - это нормально, продолжаем
                 
-                vTaskDelay(pdMS_TO_TICKS(10));
+                vTaskDelay(pdMS_TO_TICKS(2));
                 break;
             }
             
@@ -581,9 +582,9 @@ void tcp_t::read_and_process_data(tcp_t* tcp, char* rx_raw)
         
         if (len > 0)
         {
-            ESP_LOGI(TAG, "Received %d bytes from socket", len);
+            ESP_LOGD(TAG, "Received %d bytes from socket", len);
             tcp->rx_buffer.insert(tcp->rx_buffer.end(), rx_raw, rx_raw + len);
-            ESP_LOGI(TAG, "RX buffer size: %u bytes", (unsigned int)tcp->rx_buffer.size());
+            ESP_LOGD(TAG, "RX buffer size: %u bytes", (unsigned int)tcp->rx_buffer.size());
             tcp->process_rx_buffer();
         }
         else if (len == 0)

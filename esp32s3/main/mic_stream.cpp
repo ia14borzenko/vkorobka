@@ -64,7 +64,9 @@ void mic_stream_set_tx_enabled(bool enabled)
 
 static esp_err_t mic_i2s_init(void)
 {
-    i2s_chan_config_t chan_cfg = I2S_CHANNEL_DEFAULT_CONFIG(I2S_NUM_AUTO, I2S_ROLE_MASTER);
+    // Явно I2S0: второй периферийный порт (динамик) — I2S1, иначе предупреждение
+    // «controller 0 has been occupied» и треск на выходе.
+    i2s_chan_config_t chan_cfg = I2S_CHANNEL_DEFAULT_CONFIG(I2S_NUM_0, I2S_ROLE_MASTER);
     chan_cfg.dma_desc_num = 8;
     chan_cfg.dma_frame_num = 256;
     esp_err_t err = i2s_new_channel(&chan_cfg, nullptr, &s_rx);

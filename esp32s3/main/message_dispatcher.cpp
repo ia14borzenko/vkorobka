@@ -2,6 +2,7 @@
 #include "command_handler.hpp"
 #include "stream_handler.hpp"
 #include "mic_stream.hpp"
+#include "dyn_playback.hpp"
 #include "message_bridge.hpp"
 #include "esp_log.h"
 #include "my_types.h"
@@ -22,8 +23,16 @@ void message_dispatcher_handle_new_message(const msg_header_t* header, const u8*
         return;
     }
     
-    ESP_LOGI(TAG, "[RX] New protocol message: type=%d, src=%d, dst=%d, len=%u",
-             header->msg_type, header->source_id, header->destination_id, header->payload_len);
+    if (header->msg_type == MSG_TYPE_STREAM)
+    {
+        ESP_LOGD(TAG, "[RX] STREAM src=%d dst=%d stream_id=%u len=%u", header->source_id,
+                 header->destination_id, (unsigned)header->stream_id, header->payload_len);
+    }
+    else
+    {
+        ESP_LOGI(TAG, "[RX] New protocol message: type=%d, src=%d, dst=%d, len=%u",
+                 header->msg_type, header->source_id, header->destination_id, header->payload_len);
+    }
     
     // Обработка команд TEST и STATUS от win-x64
     if (header->source_id == MSG_SRC_WIN && header->destination_id == MSG_DST_ESP32 && 
@@ -102,6 +111,46 @@ void message_dispatcher_handle_new_message(const msg_header_t* header, const u8*
                 }
                 return;
             }
+            if (strcmp(vbuf, "dyn.on") == 0)
+            {
+                free(vbuf);
+                dyn_playback_set_armed(true);
+                if (g_message_bridge)
+                {
+                    const char* ack = "DYN_ON_OK";
+                    msg_header_t rh = msg_create_header(
+                        MSG_TYPE_RESPONSE,
+                        MSG_SRC_ESP32,
+                        MSG_DST_EXTERNAL,
+                        128,
+                        0,
+                        (u32)strlen(ack),
+                        0,
+                        MSG_ROUTE_NONE);
+                    g_message_bridge->send_message(rh, reinterpret_cast<const u8*>(ack), (u32)strlen(ack));
+                }
+                return;
+            }
+            if (strcmp(vbuf, "dyn.off") == 0)
+            {
+                free(vbuf);
+                dyn_playback_set_armed(false);
+                if (g_message_bridge)
+                {
+                    const char* ack = "DYN_OFF_OK";
+                    msg_header_t rh = msg_create_header(
+                        MSG_TYPE_RESPONSE,
+                        MSG_SRC_ESP32,
+                        MSG_DST_EXTERNAL,
+                        128,
+                        0,
+                        (u32)strlen(ack),
+                        0,
+                        MSG_ROUTE_NONE);
+                    g_message_bridge->send_message(rh, reinterpret_cast<const u8*>(ack), (u32)strlen(ack));
+                }
+                return;
+            }
             free(vbuf);
         }
     }
@@ -136,12 +185,22 @@ void message_dispatcher_handle_new_message(const msg_header_t* header, const u8*
         return;
     }
 
-    // Обработка потоковых кадров для дисплея (STREAM с RGB565 кадром из чанков)
+    // Потоковые данные: stream_id 1 = LCD, 3 = PCM на динамик (MAX98357A)
     if (header->destination_id == MSG_DST_ESP32 &&
         header->msg_type == MSG_TYPE_STREAM &&
         payload && payload_len > 0)
     {
-        stream_handler_process_chunk(payload, payload_len, header->stream_id, header->sequence);
+        if (header->stream_id == LCD_STREAM_ID_FRAME)
+        {
+            stream_handler_process_chunk(payload, payload_len, header->stream_id, header->sequence);
+            return;
+        }
+        if (header->stream_id == DYN_STREAM_ID)
+        {
+            dyn_playback_feed(payload, payload_len);
+            return;
+        }
+        ESP_LOGW(TAG, "Unknown stream_id=%u (not LCD/audio)", (unsigned)header->stream_id);
         return;
     }
 }

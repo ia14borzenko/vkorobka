@@ -13,8 +13,6 @@ extern Ili9486Display* s_lcd;  // Глобальный указатель на �
 static LcdStreamState s_lcd_stream;
 extern message_bridge_t* g_message_bridge;
 
-static constexpr u16 LCD_STREAM_ID_FRAME = 1;
-
 void stream_handler_init(Ili9486Display* lcd) {
     s_lcd = lcd;
     memset(&s_lcd_stream, 0, sizeof(s_lcd_stream));

@@ -3,6 +3,7 @@
 """
 import socket
 import json
+import sys
 import threading
 import time
 import uuid
@@ -240,6 +241,38 @@ class VkorobkaClient:
     # --- Новый API для потоковой передачи кадров на дисплей ---
 
     STREAM_ID_LCD_FRAME = 1
+    STREAM_ID_DYN_PCM = 3
+
+    @staticmethod
+    def pack_pcm24_stream_payload_mono(
+        mono_int24: Any, sample_rate_hz: int = 48000
+    ) -> bytes:
+        """
+        Бинарный payload как у mic_stream (ESP32): u32 rate, u16 count, u16 bits=24,
+        затем моно PCM 24-bit little-endian (несжатые отсчёты).
+        mono_int24: последовательность int32 в диапазоне int24.
+        """
+        import numpy as np
+        import struct
+
+        arr = np.asarray(mono_int24, dtype=np.int32).ravel()
+        n = int(arr.size)
+        if n <= 0 or n > 512:
+            raise ValueError(f"sample_count must be 1..512, got {n}")
+        if sample_rate_hz != 48000:
+            raise ValueError("ESP32 dyn_playback ожидает 48000 Hz")
+        header = struct.pack("<IHH", int(sample_rate_hz), n, 24)
+        out = bytearray(header)
+        lo = -0x800000
+        hi = 0x7FFFFF
+        for i in range(n):
+            v = int(arr[i])
+            if v < lo:
+                v = lo
+            elif v > hi:
+                v = hi
+            out.extend(v.to_bytes(3, byteorder="little", signed=True))
+        return bytes(out)
 
     def _send_stream_chunk(
         self,
@@ -247,11 +280,14 @@ class VkorobkaClient:
         stream_id: int,
         seq: int,
         chunk_payload_b64: str,
-        test_id: str,
+        test_id: Optional[str] = None,
         extra_fields: Optional[dict] = None,
+        verbose: bool = True,
     ) -> None:
         """
         Внутренний метод отправки одного STREAM-сообщения с base64-чанком.
+        test_id: если None или пустая строка — поле не добавляется (чтобы не затирать
+        соответствие destination→test_id на win-x64 между dyn.on и dyn.off).
         """
         message = {
             "type": "stream",
@@ -261,8 +297,9 @@ class VkorobkaClient:
             "stream_id": stream_id,
             "payload": chunk_payload_b64,
             "seq": seq,
-            "test_id": test_id,
         }
+        if test_id:
+            message["test_id"] = test_id
 
         if extra_fields:
             message.update(extra_fields)
@@ -270,10 +307,11 @@ class VkorobkaClient:
         json_str = json.dumps(message)
         self.sock.sendto(json_str.encode("utf-8"), (self.server_host, self.server_port))
 
-        print(
-            f"[client] [STREAM] Отправлен чанк seq={seq}, stream_id={stream_id}, "
-            f"base64_len={len(chunk_payload_b64)}"
-        )
+        if verbose:
+            print(
+                f"[client] [STREAM] Отправлен чанк seq={seq}, stream_id={stream_id}, "
+                f"base64_len={len(chunk_payload_b64)}"
+            )
 
     def send_lcd_frame_rgb565(
         self,
@@ -377,6 +415,7 @@ class VkorobkaClient:
                 chunk_payload_b64=chunk_b64,
                 test_id=test_id,
                 extra_fields=None,
+                verbose=True,
             )
             
             # Ждём подтверждения приёма этого чанка (flow control)
@@ -421,7 +460,104 @@ class VkorobkaClient:
         else:
             print(f"[client] [STREAM] Получен финальный ответ на LCD кадр: {response}")
         return response
-    
+
+    def play_audio_file_to_esp32_dyn(
+        self,
+        file_path: str,
+        chunk_samples: int = 512,
+        pace: bool = True,
+        pace_factor: float = 0.97,
+        command_timeout: float = 15.0,
+    ) -> bool:
+        """
+        Воспроизведение на динамик (MAX98357A): dyn.on → STREAM stream_id=3 (PCM24 mono 48 kHz)
+        → dyn.off. Чанки без test_id, чтобы не ломать маршрутизацию ответов на win-x64.
+
+        Требуются: numpy, soundfile; при несовпадении частоты дискретизации — scipy.
+        """
+        import time
+        from pathlib import Path
+
+        import numpy as np
+
+        try:
+            import soundfile as sf
+        except ImportError as e:
+            print("[client] Нужен soundfile: pip install soundfile", file=sys.stderr)
+            raise e
+
+        path = Path(file_path).expanduser()
+        if not path.is_file():
+            print(f"[client] Файл не найден: {path}")
+            return False
+
+        audio, sr = sf.read(str(path), always_2d=False, dtype="float64")
+        if audio.ndim > 1:
+            audio = np.mean(audio, axis=1)
+
+        target_sr = 48000
+        if int(sr) != target_sr:
+            try:
+                from scipy import signal
+
+                n_out = max(1, int(round(audio.shape[0] * target_sr / float(sr))))
+                audio = signal.resample(audio, n_out)
+                sr = target_sr
+                print(f"[client] Ресэмплинг → {target_sr} Hz (scipy)")
+            except ImportError:
+                print(
+                    f"[client] Файл {sr} Hz, нужен 48000 Hz. Установите scipy или конвертируйте файл.",
+                    file=sys.stderr,
+                )
+                return False
+
+        # float [-1,1] → int24
+        clip = np.clip(audio, -1.0, 1.0)
+        samples_i32 = (clip * (2**23 - 1.0)).astype(np.int32)
+        n_total = samples_i32.size
+        if n_total == 0:
+            print("[client] Пустой файл")
+            return False
+
+        if chunk_samples < 1 or chunk_samples > 512:
+            raise ValueError("chunk_samples must be 1..512")
+
+        tid_on = self.send_command("esp32", "dyn.on")
+        resp_on = self.wait_for_response(tid_on, timeout=command_timeout)
+        if not resp_on:
+            print("[client] Нет ответа на dyn.on")
+            return False
+
+        seq = 0
+        for start in range(0, n_total, chunk_samples):
+            block = samples_i32[start : start + chunk_samples]
+            payload = self.pack_pcm24_stream_payload_mono(block, sample_rate_hz=target_sr)
+            chunk_b64 = image_to_base64(payload)
+            self._send_stream_chunk(
+                destination="esp32",
+                stream_id=self.STREAM_ID_DYN_PCM,
+                seq=seq,
+                chunk_payload_b64=chunk_b64,
+                test_id=None,
+                extra_fields=None,
+                verbose=False,
+            )
+            seq += 1
+            if pace and block.size > 0:
+                delay = (block.size / float(target_sr)) * pace_factor
+                time.sleep(delay)
+
+        # Очередь на ESP32 и TCP — дождаться drain перед dyn.off, иначе ответ теряется
+        time.sleep(0.35)
+
+        tid_off = self.send_command("esp32", "dyn.off")
+        resp_off = self.wait_for_response(tid_off, timeout=command_timeout)
+        if not resp_off:
+            print("[client] Предупреждение: нет ответа на dyn.off")
+            return False
+        print("[client] Воспроизведение завершено (dyn.off OK)")
+        return True
+
     def wait_for_response(self, test_id: str, timeout: Optional[float] = None) -> Optional[Dict]:
         """
         Ожидает ответ на тестовое сообщение
