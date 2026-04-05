@@ -12,8 +12,11 @@
 
 static const char* TAG = "dyn_playback";
 
-static constexpr u32 DYN_SAMPLE_RATE_HZ = 48000;
-static constexpr size_t BYTES_PER_PCM24 = 3;
+// 22050 Гц, 16 bit — меньше трафика и реже чанки/сек относительно 48k/24bit.
+// В даташите MAX98357 22.05 kHz не в списке «поддерживаемых» LRCLK; при сбоях см. 16/32 kHz.
+static constexpr u32 DYN_SAMPLE_RATE_HZ = 22050;
+static constexpr u16 DYN_BITS_PER_SAMPLE = 16;
+static constexpr size_t BYTES_PER_PCM16 = 2;
 static constexpr u16 DYN_MAX_MONO_SAMPLES = 512;
 static constexpr u32 QUEUE_DEPTH = 16;
 static constexpr size_t SILENCE_STEREO_FRAMES_ON_OFF = 256;
@@ -45,14 +48,10 @@ static size_t chunk_alloc_bytes(u16 stereo_frames)
     return sizeof(DynPcmChunk) + (size_t)stereo_frames * 2u * sizeof(int32_t);
 }
 
-static int32_t unpack_i24_le(const uint8_t* p)
+/** int16 LE → значение для 32-bit Philips-слота (старшие 16 бит). */
+static int32_t i16_to_i32_slot(int16_t s)
 {
-    uint32_t u = (uint32_t)p[0] | ((uint32_t)p[1] << 8) | ((uint32_t)p[2] << 16);
-    if (u & 0x800000u)
-    {
-        u |= 0xFF000000u;
-    }
-    return (int32_t)u;
+    return (int32_t)s << 16;
 }
 
 static void sd_mode_shutdown(void)
@@ -256,15 +255,17 @@ void dyn_playback_feed(const u8* payload, u32 payload_len)
     }
 
     const PcmStreamHeader* hdr = (const PcmStreamHeader*)payload;
-    if (hdr->sample_rate_hz != DYN_SAMPLE_RATE_HZ || hdr->bits_per_sample != 24 ||
+    if (hdr->sample_rate_hz != DYN_SAMPLE_RATE_HZ || hdr->bits_per_sample != DYN_BITS_PER_SAMPLE ||
         hdr->sample_count == 0 || hdr->sample_count > DYN_MAX_MONO_SAMPLES)
     {
-        ESP_LOGW(TAG, "bad hdr: rate=%u bits=%u n=%u", (unsigned)hdr->sample_rate_hz,
-                 (unsigned)hdr->bits_per_sample, (unsigned)hdr->sample_count);
+        ESP_LOGW(TAG, "bad hdr: rate=%u bits=%u n=%u (expect %u Hz, %u-bit)",
+                 (unsigned)hdr->sample_rate_hz, (unsigned)hdr->bits_per_sample,
+                 (unsigned)hdr->sample_count, (unsigned)DYN_SAMPLE_RATE_HZ,
+                 (unsigned)DYN_BITS_PER_SAMPLE);
         return;
     }
 
-    const u32 pcm_bytes = (u32)hdr->sample_count * BYTES_PER_PCM24;
+    const u32 pcm_bytes = (u32)hdr->sample_count * BYTES_PER_PCM16;
     if (payload_len < hdr_sz + pcm_bytes)
     {
         ESP_LOGW(TAG, "short payload: %u < %u", (unsigned)payload_len,
@@ -287,8 +288,9 @@ void dyn_playback_feed(const u8* payload, u32 payload_len)
     const uint8_t* pcm = payload + hdr_sz;
     for (u16 i = 0; i < n; ++i)
     {
-        int32_t s24 = unpack_i24_le(pcm + (size_t)i * BYTES_PER_PCM24);
-        int32_t slot = s24 << 8;
+        int16_t s16 = (int16_t)(uint16_t)(pcm[(size_t)i * BYTES_PER_PCM16] |
+                                          ((uint16_t)pcm[(size_t)i * BYTES_PER_PCM16 + 1] << 8));
+        int32_t slot = i16_to_i32_slot(s16);
         out[2 * i] = slot;
         out[2 * i + 1] = slot;
     }

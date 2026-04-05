@@ -242,15 +242,47 @@ class VkorobkaClient:
 
     STREAM_ID_LCD_FRAME = 1
     STREAM_ID_DYN_PCM = 3
+    # Синхронно с esp32s3/main/dyn_playback.cpp (меньше трафика, чем 48k/24bit)
+    DYN_PCM_SAMPLE_RATE_HZ = 22050
+    DYN_PCM_BITS = 16
+
+    @staticmethod
+    def pack_pcm16_stream_payload_mono_dyn(
+        mono_int16: Any, sample_rate_hz: Optional[int] = None, bits: int = 16
+    ) -> bytes:
+        """
+        Payload для dyn_playback на ESP32: u32 rate, u16 count, u16 bits,
+        затем моно PCM 16-bit little-endian (несжатые отсчёты).
+        """
+        import numpy as np
+        import struct
+
+        if sample_rate_hz is None:
+            sample_rate_hz = VkorobkaClient.DYN_PCM_SAMPLE_RATE_HZ
+        if bits != 16:
+            raise ValueError("dyn_playback принимает только 16-bit PCM")
+        if int(sample_rate_hz) != int(VkorobkaClient.DYN_PCM_SAMPLE_RATE_HZ):
+            raise ValueError(
+                f"dyn_playback ожидает {VkorobkaClient.DYN_PCM_SAMPLE_RATE_HZ} Hz, got {sample_rate_hz}"
+            )
+
+        arr = np.asarray(mono_int16, dtype=np.int16).ravel().astype("<i2", copy=False)
+        n = int(arr.size)
+        if n <= 0 or n > 512:
+            raise ValueError(f"sample_count must be 1..512, got {n}")
+        header = struct.pack("<IHH", int(sample_rate_hz), n, 16)
+        body = arr.tobytes(order="C")
+        if len(body) != n * 2:
+            raise RuntimeError("PCM16 packing size mismatch")
+        return header + body
 
     @staticmethod
     def pack_pcm24_stream_payload_mono(
         mono_int24: Any, sample_rate_hz: int = 48000
     ) -> bytes:
         """
-        Бинарный payload как у mic_stream (ESP32): u32 rate, u16 count, u16 bits=24,
-        затем моно PCM 24-bit little-endian (несжатые отсчёты).
-        mono_int24: последовательность int32 в диапазоне int24.
+        Бинарный payload как у mic_stream uplink (ESP32): 48 kHz, 24-bit LE.
+        Для вывода на динамик используйте pack_pcm16_stream_payload_mono_dyn.
         """
         import numpy as np
         import struct
@@ -260,7 +292,7 @@ class VkorobkaClient:
         if n <= 0 or n > 512:
             raise ValueError(f"sample_count must be 1..512, got {n}")
         if sample_rate_hz != 48000:
-            raise ValueError("ESP32 dyn_playback ожидает 48000 Hz")
+            raise ValueError("mic-style pack: ожидается 48000 Hz")
         header = struct.pack("<IHH", int(sample_rate_hz), n, 24)
         out = bytearray(header)
         lo = -0x800000
@@ -470,10 +502,10 @@ class VkorobkaClient:
         command_timeout: float = 15.0,
     ) -> bool:
         """
-        Воспроизведение на динамик (MAX98357A): dyn.on → STREAM stream_id=3 (PCM24 mono 48 kHz)
-        → dyn.off. Чанки без test_id, чтобы не ломать маршрутизацию ответов на win-x64.
+        Воспроизведение на динамик (MAX98357A): dyn.on → STREAM stream_id=3
+        (моно PCM 16-bit LE, 22050 Hz) → dyn.off.
 
-        Требуются: numpy, soundfile; при несовпадении частоты дискретизации — scipy.
+        Требуются: numpy, soundfile; ресэмплинг в 22050 Hz — scipy.
         """
         import time
         from pathlib import Path
@@ -495,7 +527,7 @@ class VkorobkaClient:
         if audio.ndim > 1:
             audio = np.mean(audio, axis=1)
 
-        target_sr = 48000
+        target_sr = int(self.DYN_PCM_SAMPLE_RATE_HZ)
         if int(sr) != target_sr:
             try:
                 from scipy import signal
@@ -506,15 +538,15 @@ class VkorobkaClient:
                 print(f"[client] Ресэмплинг → {target_sr} Hz (scipy)")
             except ImportError:
                 print(
-                    f"[client] Файл {sr} Hz, нужен 48000 Hz. Установите scipy или конвертируйте файл.",
+                    f"[client] Файл {sr} Hz, нужен {target_sr} Hz. Установите scipy или конвертируйте файл.",
                     file=sys.stderr,
                 )
                 return False
 
-        # float [-1,1] → int24
+        # float [-1,1] → int16
         clip = np.clip(audio, -1.0, 1.0)
-        samples_i32 = (clip * (2**23 - 1.0)).astype(np.int32)
-        n_total = samples_i32.size
+        samples_i16 = (clip * 32767.0).astype(np.int16)
+        n_total = samples_i16.size
         if n_total == 0:
             print("[client] Пустой файл")
             return False
@@ -530,8 +562,8 @@ class VkorobkaClient:
 
         seq = 0
         for start in range(0, n_total, chunk_samples):
-            block = samples_i32[start : start + chunk_samples]
-            payload = self.pack_pcm24_stream_payload_mono(block, sample_rate_hz=target_sr)
+            block = samples_i16[start : start + chunk_samples]
+            payload = self.pack_pcm16_stream_payload_mono_dyn(block)
             chunk_b64 = image_to_base64(payload)
             self._send_stream_chunk(
                 destination="esp32",

@@ -2,8 +2,8 @@
 """
 Воспроизведение аудиофайла на динамике ESP32-S3 (MAX98357A) через pyapp → win-x64 → TCP → ESP32.
 
-Передаются несжатые отсчёты: моно PCM 24-bit little-endian в payload, 48 kHz, тот же формат,
-что uplink с микрофона (stream_id=2), для динамика используется stream_id=3.
+Передаются несжатые отсчёты: моно PCM 16-bit little-endian, 22050 Hz, stream_id=3
+(меньше нагрузка на сеть, чем 48 kHz / 24-bit).
 
 Последовательность: команда dyn.on → серия MSG_TYPE_STREAM (чанки до 512 сэмплов) → dyn.off.
 
@@ -11,7 +11,7 @@
   python speaker_cli.py --host 127.0.0.1 --port 1236 path/to/audio.wav
   python speaker_cli.py music.flac --no-pace
 
-Требования: numpy, soundfile; для файлов не 48 kHz — scipy (ресэмплинг).
+Требования: numpy, soundfile; scipy — ресэмплинг в 22050 Hz при другой частоте файла.
 Перед запуском: win-x64 и прошивка ESP32 с поддержкой dyn.on / dyn.off и I2S на усилитель.
 """
 from __future__ import annotations
@@ -25,7 +25,7 @@ from vkorobka_client import VkorobkaClient
 
 def main() -> int:
     parser = argparse.ArgumentParser(
-        description="Вывод WAV/FLAC на динамик ESP32 (48 kHz, PCM24 по протоколу vkorobka)"
+        description="Вывод WAV/FLAC на динамик ESP32 (22050 Hz, PCM16 по протоколу vkorobka)"
     )
     parser.add_argument("audio_file", type=Path, help="WAV, FLAC и др. (через soundfile)")
     parser.add_argument("--host", default="127.0.0.1", help="UDP хост win-x64")
