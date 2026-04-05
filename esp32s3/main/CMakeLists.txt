@@ -27,4 +27,5 @@ idf_component_register(
         esp_lcd
         driver
         esp_driver_i2s
+        json
 )

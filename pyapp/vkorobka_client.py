@@ -242,35 +242,42 @@ class VkorobkaClient:
 
     STREAM_ID_LCD_FRAME = 1
     STREAM_ID_DYN_PCM = 3
-    # Синхронно с esp32s3/main/dyn_playback.cpp (меньше трафика, чем 48k/24bit)
+    # Дефолты и белый список — синхронно с esp32s3/main/dyn_playback.cpp
     DYN_PCM_SAMPLE_RATE_HZ = 22050
     DYN_PCM_BITS = 16
+    DYN_ALLOWED_SAMPLE_RATES_HZ = frozenset(
+        (8000, 11025, 12000, 16000, 22050, 24000, 32000, 44100, 48000)
+    )
 
     @staticmethod
     def pack_pcm16_stream_payload_mono_dyn(
-        mono_int16: Any, sample_rate_hz: Optional[int] = None, bits: int = 16
+        mono_int16: Any,
+        sample_rate_hz: Optional[int] = None,
+        bits: int = 16,
     ) -> bytes:
         """
         Payload для dyn_playback на ESP32: u32 rate, u16 count, u16 bits,
         затем моно PCM 16-bit little-endian (несжатые отсчёты).
+        sample_rate_hz должен совпадать с последним успешным dyn.set на устройстве.
         """
         import numpy as np
         import struct
 
         if sample_rate_hz is None:
             sample_rate_hz = VkorobkaClient.DYN_PCM_SAMPLE_RATE_HZ
+        sr = int(sample_rate_hz)
+        if sr not in VkorobkaClient.DYN_ALLOWED_SAMPLE_RATES_HZ:
+            raise ValueError(
+                f"dyn_playback: rate_hz {sr} не из белого списка {sorted(VkorobkaClient.DYN_ALLOWED_SAMPLE_RATES_HZ)}"
+            )
         if bits != 16:
             raise ValueError("dyn_playback принимает только 16-bit PCM")
-        if int(sample_rate_hz) != int(VkorobkaClient.DYN_PCM_SAMPLE_RATE_HZ):
-            raise ValueError(
-                f"dyn_playback ожидает {VkorobkaClient.DYN_PCM_SAMPLE_RATE_HZ} Hz, got {sample_rate_hz}"
-            )
 
         arr = np.asarray(mono_int16, dtype=np.int16).ravel().astype("<i2", copy=False)
         n = int(arr.size)
         if n <= 0 or n > 512:
             raise ValueError(f"sample_count must be 1..512, got {n}")
-        header = struct.pack("<IHH", int(sample_rate_hz), n, 16)
+        header = struct.pack("<IHH", sr, n, 16)
         body = arr.tobytes(order="C")
         if len(body) != n * 2:
             raise RuntimeError("PCM16 packing size mismatch")
@@ -305,6 +312,76 @@ class VkorobkaClient:
                 v = hi
             out.extend(v.to_bytes(3, byteorder="little", signed=True))
         return bytes(out)
+
+    @staticmethod
+    def _ack_payload_text(resp: Dict) -> str:
+        pl = resp.get("payload") or ""
+        if not pl:
+            return ""
+        try:
+            import base64
+
+            return base64.b64decode(pl).decode("utf-8", errors="replace")
+        except Exception:
+            return ""
+
+    def send_voice_set(
+        self,
+        rate_hz: int = 48000,
+        bits: int = 24,
+        gain_db: float = 3.0,
+        chunk_samples: int = 512,
+        mute: bool = False,
+        clip: bool = True,
+        command_timeout: float = 10.0,
+    ) -> bool:
+        """Команда voice.set {JSON} на ESP32 (только при voice.off на устройстве)."""
+        body = {
+            "rate_hz": int(rate_hz),
+            "bits": int(bits),
+            "gain_db": float(gain_db),
+            "chunk_samples": int(chunk_samples),
+            "mute": bool(mute),
+            "clip": bool(clip),
+        }
+        cmd = "voice.set " + json.dumps(body, separators=(",", ":"), ensure_ascii=False)
+        tid = self.send_command("esp32", cmd)
+        resp = self.wait_for_response(tid, timeout=command_timeout)
+        if not resp:
+            print("[client] Нет ответа на voice.set", file=sys.stderr)
+            return False
+        ok = "VOICE_SET_OK" in self._ack_payload_text(resp)
+        if not ok:
+            print("[client] voice.set отклонён:", self._ack_payload_text(resp), file=sys.stderr)
+        return ok
+
+    def send_dyn_set(
+        self,
+        rate_hz: int = 22050,
+        bits: int = 16,
+        gain_db: float = 0.0,
+        mute: bool = False,
+        clip: bool = True,
+        command_timeout: float = 10.0,
+    ) -> bool:
+        """Команда dyn.set {JSON} на ESP32 (только при dyn.off)."""
+        body = {
+            "rate_hz": int(rate_hz),
+            "bits": int(bits),
+            "gain_db": float(gain_db),
+            "mute": bool(mute),
+            "clip": bool(clip),
+        }
+        cmd = "dyn.set " + json.dumps(body, separators=(",", ":"), ensure_ascii=False)
+        tid = self.send_command("esp32", cmd)
+        resp = self.wait_for_response(tid, timeout=command_timeout)
+        if not resp:
+            print("[client] Нет ответа на dyn.set", file=sys.stderr)
+            return False
+        ok = "DYN_SET_OK" in self._ack_payload_text(resp)
+        if not ok:
+            print("[client] dyn.set отклонён:", self._ack_payload_text(resp), file=sys.stderr)
+        return ok
 
     def _send_stream_chunk(
         self,
@@ -500,12 +577,18 @@ class VkorobkaClient:
         pace: bool = True,
         pace_factor: float = 0.97,
         command_timeout: float = 15.0,
+        dyn_rate_hz: Optional[int] = None,
+        dyn_bits: int = 16,
+        dyn_gain_db: float = 0.0,
+        dyn_mute: bool = False,
+        dyn_clip: bool = True,
+        send_dyn_set: bool = True,
     ) -> bool:
         """
-        Воспроизведение на динамик (MAX98357A): dyn.on → STREAM stream_id=3
-        (моно PCM 16-bit LE, 22050 Hz) → dyn.off.
+        Воспроизведение на динамик (MAX98357A): dyn.set (опц.) → dyn.on → STREAM stream_id=3
+        (моно PCM 16-bit LE) → dyn.off.
 
-        Требуются: numpy, soundfile; ресэмплинг в 22050 Hz — scipy.
+        Требуются: numpy, soundfile; ресэмплинг под dyn_rate_hz — scipy.
         """
         import time
         from pathlib import Path
@@ -523,11 +606,32 @@ class VkorobkaClient:
             print(f"[client] Файл не найден: {path}")
             return False
 
+        target_sr = int(dyn_rate_hz if dyn_rate_hz is not None else self.DYN_PCM_SAMPLE_RATE_HZ)
+        if target_sr not in self.DYN_ALLOWED_SAMPLE_RATES_HZ:
+            print(
+                f"[client] dyn_rate_hz {target_sr} не из белого списка: {sorted(self.DYN_ALLOWED_SAMPLE_RATES_HZ)}",
+                file=sys.stderr,
+            )
+            return False
+        if int(dyn_bits) != 16:
+            print("[client] dyn_bits на устройстве поддерживается только 16", file=sys.stderr)
+            return False
+
+        if send_dyn_set:
+            if not self.send_dyn_set(
+                rate_hz=target_sr,
+                bits=int(dyn_bits),
+                gain_db=float(dyn_gain_db),
+                mute=bool(dyn_mute),
+                clip=bool(dyn_clip),
+                command_timeout=command_timeout,
+            ):
+                return False
+
         audio, sr = sf.read(str(path), always_2d=False, dtype="float64")
         if audio.ndim > 1:
             audio = np.mean(audio, axis=1)
 
-        target_sr = int(self.DYN_PCM_SAMPLE_RATE_HZ)
         if int(sr) != target_sr:
             try:
                 from scipy import signal
@@ -544,8 +648,8 @@ class VkorobkaClient:
                 return False
 
         # float [-1,1] → int16
-        clip = np.clip(audio, -1.0, 1.0)
-        samples_i16 = (clip * 32767.0).astype(np.int16)
+        clip_f = np.clip(audio, -1.0, 1.0)
+        samples_i16 = (clip_f * 32767.0).astype(np.int16)
         n_total = samples_i16.size
         if n_total == 0:
             print("[client] Пустой файл")
@@ -563,7 +667,7 @@ class VkorobkaClient:
         seq = 0
         for start in range(0, n_total, chunk_samples):
             block = samples_i16[start : start + chunk_samples]
-            payload = self.pack_pcm16_stream_payload_mono_dyn(block)
+            payload = self.pack_pcm16_stream_payload_mono_dyn(block, sample_rate_hz=target_sr)
             chunk_b64 = image_to_base64(payload)
             self._send_stream_chunk(
                 destination="esp32",

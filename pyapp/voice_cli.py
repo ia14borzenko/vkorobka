@@ -111,6 +111,19 @@ def save_audio_flac_and_wav(
         return None, wav_path
 
 
+def apply_record_gain_db(samples: Any, bits: int, gain_db: float) -> Any:
+    """Доп. усиление только при записи в файл (не на ESP32)."""
+    import numpy as np
+
+    if abs(gain_db) < 1e-12:
+        return samples
+    lin = 10.0 ** (gain_db / 20.0)
+    x = np.asarray(samples, dtype=np.float64) * lin
+    if bits == 24:
+        return np.clip(np.rint(x), -8388608, 8388607).astype(np.int32)
+    return np.clip(np.rint(x), -32768, 32767).astype(np.int16)
+
+
 def write_samples_table(path: Path, samples: Any, bits: int) -> None:
     import numpy as np
 
@@ -146,7 +159,55 @@ def main() -> int:
         default=30.0,
         help="Таймаут ожидания ответов ESP (сек)",
     )
+    parser.add_argument(
+        "--mic-rate",
+        type=int,
+        default=48000,
+        help="Частота дискретизации микрофона (voice.set rate_hz), по умолчанию 48000",
+    )
+    parser.add_argument(
+        "--mic-bits",
+        type=int,
+        choices=(16, 24),
+        default=24,
+        help="Разрядность uplink (16 или 24)",
+    )
+    parser.add_argument(
+        "--mic-gain-db",
+        type=float,
+        default=3.0,
+        help="Цифровое усиление на ESP32 (gain_db), по умолчанию +3",
+    )
+    parser.add_argument(
+        "--chunk-samples",
+        type=int,
+        default=512,
+        help="Сэмплов моно на пакет (64..512, voice.set chunk_samples)",
+    )
+    parser.add_argument(
+        "--record-gain-db",
+        type=float,
+        default=0.0,
+        help="Доп. усиление (dB) только при сохранении FLAC/WAV/TSV на ПК",
+    )
+    parser.add_argument(
+        "--mic-mute",
+        action="store_true",
+        help="Передать mute:true в voice.set (тишина в потоке)",
+    )
+    parser.add_argument(
+        "--no-mic-clip",
+        action="store_true",
+        help="Передать clip:false в voice.set",
+    )
     args = parser.parse_args()
+
+    if not 64 <= args.chunk_samples <= 512:
+        print("[voice] --chunk-samples must be 64..512", file=sys.stderr)
+        return 2
+    if not 8000 <= args.mic_rate <= 96000:
+        print("[voice] --mic-rate must be 8000..96000", file=sys.stderr)
+        return 2
 
     chunks: List[Tuple[Union[array.array, Any], int]] = []
     sample_rate_ref: List[int] = [48000]
@@ -203,6 +264,18 @@ def main() -> int:
                 with lock:
                     chunks.clear()
                 recording.set()
+                if not client.send_voice_set(
+                    rate_hz=args.mic_rate,
+                    bits=args.mic_bits,
+                    gain_db=args.mic_gain_db,
+                    chunk_samples=args.chunk_samples,
+                    mute=args.mic_mute,
+                    clip=not args.no_mic_clip,
+                    command_timeout=min(10.0, args.timeout),
+                ):
+                    recording.clear()
+                    print("[voice] voice.set не применён — запись не начата")
+                    continue
                 tid = client.send_command("esp32", "voice.on")
                 resp = client.wait_for_response(tid, timeout=10.0)
                 if resp:
@@ -244,6 +317,7 @@ def main() -> int:
                 if n == 0:
                     print("[voice] Нет сэмплов — файлы не созданы")
                     continue
+                merged = apply_record_gain_db(merged, br, args.record_gain_db)
                 out_flac, out_wav = save_audio_flac_and_wav(
                     args.output, wav_path, merged, sr, br
                 )

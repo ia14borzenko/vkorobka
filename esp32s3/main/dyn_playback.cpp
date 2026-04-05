@@ -1,5 +1,6 @@
 #include "dyn_playback.hpp"
 #include "dyn_pins.hpp"
+#include "cJSON.h"
 #include "esp_heap_caps.h"
 #include "esp_log.h"
 #include "freertos/FreeRTOS.h"
@@ -8,18 +9,45 @@
 #include "driver/gpio.h"
 #include "driver/i2s_std.h"
 #include <atomic>
-#include <string.h>
+#include <cmath>
+#include <cstring>
 
 static const char* TAG = "dyn_playback";
 
-// 22050 Гц, 16 bit — меньше трафика и реже чанки/сек относительно 48k/24bit.
-// В даташите MAX98357 22.05 kHz не в списке «поддерживаемых» LRCLK; при сбоях см. 16/32 kHz.
-static constexpr u32 DYN_SAMPLE_RATE_HZ = 22050;
 static constexpr u16 DYN_BITS_PER_SAMPLE = 16;
 static constexpr size_t BYTES_PER_PCM16 = 2;
 static constexpr u16 DYN_MAX_MONO_SAMPLES = 512;
 static constexpr u32 QUEUE_DEPTH = 16;
 static constexpr size_t SILENCE_STEREO_FRAMES_ON_OFF = 256;
+
+// Поддерживаемые LRCLK для MAX98357 / I2S (белый список).
+static bool dyn_rate_allowed(u32 rate_hz)
+{
+    switch (rate_hz)
+    {
+    case 8000:
+    case 11025:
+    case 12000:
+    case 16000:
+    case 22050:
+    case 24000:
+    case 32000:
+    case 44100:
+    case 48000:
+        return true;
+    default:
+        return false;
+    }
+}
+
+struct DynPlaybackConfig
+{
+    u32 rate_hz = 22050;
+    u16 bits = 16;
+    float gain_db = 0.0f;
+    bool mute = false;
+    bool clip = true;
+};
 
 struct __attribute__((packed)) PcmStreamHeader
 {
@@ -42,16 +70,22 @@ static int32_t* chunk_samples(DynPcmChunk* c)
 static i2s_chan_handle_t s_tx = nullptr;
 static QueueHandle_t s_queue = nullptr;
 static std::atomic<bool> s_armed{false};
+static portMUX_TYPE s_cfg_mu = portMUX_INITIALIZER_UNLOCKED;
+static DynPlaybackConfig s_cfg;
 
 static size_t chunk_alloc_bytes(u16 stereo_frames)
 {
     return sizeof(DynPcmChunk) + (size_t)stereo_frames * 2u * sizeof(int32_t);
 }
 
-/** int16 LE → значение для 32-bit Philips-слота (старшие 16 бит). */
 static int32_t i16_to_i32_slot(int16_t s)
 {
     return (int32_t)s << 16;
+}
+
+static float db_to_linear(float db)
+{
+    return powf(10.0f, db / 20.0f);
 }
 
 static void sd_mode_shutdown(void)
@@ -98,8 +132,21 @@ static void write_silence_stereo(size_t stereo_frames)
     heap_caps_free(z);
 }
 
-static esp_err_t dyn_i2s_tx_init(void)
+static void dyn_i2s_tx_shutdown(void)
 {
+    if (!s_tx)
+    {
+        return;
+    }
+    (void)i2s_channel_disable(s_tx);
+    (void)i2s_del_channel(s_tx);
+    s_tx = nullptr;
+}
+
+static esp_err_t dyn_i2s_tx_init_from_config(const DynPlaybackConfig& cfg)
+{
+    dyn_i2s_tx_shutdown();
+
     i2s_chan_config_t chan_cfg = I2S_CHANNEL_DEFAULT_CONFIG(I2S_NUM_1, I2S_ROLE_MASTER);
     chan_cfg.dma_desc_num = 8;
     chan_cfg.dma_frame_num = 256;
@@ -111,7 +158,7 @@ static esp_err_t dyn_i2s_tx_init(void)
     }
 
     i2s_std_config_t std_cfg = {
-        .clk_cfg = I2S_STD_CLK_DEFAULT_CONFIG(DYN_SAMPLE_RATE_HZ),
+        .clk_cfg = I2S_STD_CLK_DEFAULT_CONFIG(cfg.rate_hz),
         .slot_cfg = I2S_STD_PHILIPS_SLOT_DEFAULT_CONFIG(I2S_DATA_BIT_WIDTH_32BIT,
                                                         I2S_SLOT_MODE_STEREO),
         .gpio_cfg = {
@@ -144,6 +191,7 @@ static esp_err_t dyn_i2s_tx_init(void)
         s_tx = nullptr;
         return err;
     }
+    ESP_LOGI(TAG, "I2S TX rate=%u Hz", (unsigned)cfg.rate_hz);
     return ESP_OK;
 }
 
@@ -222,7 +270,8 @@ void dyn_playback_init(void)
     ESP_ERROR_CHECK(gpio_config(&io));
     sd_mode_shutdown();
 
-    if (dyn_i2s_tx_init() != ESP_OK)
+    s_cfg = DynPlaybackConfig{};
+    if (dyn_i2s_tx_init_from_config(s_cfg) != ESP_OK)
     {
         return;
     }
@@ -243,10 +292,15 @@ void dyn_playback_init(void)
 
 void dyn_playback_feed(const u8* payload, u32 payload_len)
 {
-    if (!s_tx || !s_queue || !payload || !s_armed.load(std::memory_order_relaxed))
+    if (!s_tx || !s_queue || !s_armed.load(std::memory_order_relaxed))
     {
         return;
     }
+
+    DynPlaybackConfig cfg;
+    portENTER_CRITICAL(&s_cfg_mu);
+    cfg = s_cfg;
+    portEXIT_CRITICAL(&s_cfg_mu);
 
     const u32 hdr_sz = (u32)sizeof(PcmStreamHeader);
     if (payload_len < hdr_sz)
@@ -255,13 +309,17 @@ void dyn_playback_feed(const u8* payload, u32 payload_len)
     }
 
     const PcmStreamHeader* hdr = (const PcmStreamHeader*)payload;
-    if (hdr->sample_rate_hz != DYN_SAMPLE_RATE_HZ || hdr->bits_per_sample != DYN_BITS_PER_SAMPLE ||
+    if (hdr->sample_rate_hz != cfg.rate_hz || hdr->bits_per_sample != cfg.bits ||
         hdr->sample_count == 0 || hdr->sample_count > DYN_MAX_MONO_SAMPLES)
     {
         ESP_LOGW(TAG, "bad hdr: rate=%u bits=%u n=%u (expect %u Hz, %u-bit)",
                  (unsigned)hdr->sample_rate_hz, (unsigned)hdr->bits_per_sample,
-                 (unsigned)hdr->sample_count, (unsigned)DYN_SAMPLE_RATE_HZ,
-                 (unsigned)DYN_BITS_PER_SAMPLE);
+                 (unsigned)hdr->sample_count, (unsigned)cfg.rate_hz, (unsigned)cfg.bits);
+        return;
+    }
+
+    if (cfg.bits != DYN_BITS_PER_SAMPLE)
+    {
         return;
     }
 
@@ -286,10 +344,32 @@ void dyn_playback_feed(const u8* payload, u32 payload_len)
 
     int32_t* out = chunk_samples(chunk);
     const uint8_t* pcm = payload + hdr_sz;
+    const float g_lin = db_to_linear(cfg.gain_db);
+
     for (u16 i = 0; i < n; ++i)
     {
         int16_t s16 = (int16_t)(uint16_t)(pcm[(size_t)i * BYTES_PER_PCM16] |
                                           ((uint16_t)pcm[(size_t)i * BYTES_PER_PCM16 + 1] << 8));
+        if (cfg.mute)
+        {
+            s16 = 0;
+        }
+        else
+        {
+            float y = (float)s16 * g_lin;
+            if (cfg.clip)
+            {
+                if (y > 32767.0f)
+                {
+                    y = 32767.0f;
+                }
+                if (y < -32768.0f)
+                {
+                    y = -32768.0f;
+                }
+            }
+            s16 = (int16_t)lrintf(y);
+        }
         int32_t slot = i16_to_i32_slot(s16);
         out[2 * i] = slot;
         out[2 * i + 1] = slot;
@@ -320,4 +400,134 @@ void dyn_playback_set_armed(bool armed)
 bool dyn_playback_is_armed(void)
 {
     return s_armed.load(std::memory_order_relaxed);
+}
+
+static bool parse_u32(const cJSON* o, const char* key, u32* out)
+{
+    const cJSON* it = cJSON_GetObjectItemCaseSensitive(o, key);
+    if (!it || !cJSON_IsNumber(it))
+    {
+        return false;
+    }
+    *out = (u32)it->valuedouble;
+    return true;
+}
+
+static bool parse_u16_loose(const cJSON* o, const char* key, u16* out)
+{
+    const cJSON* it = cJSON_GetObjectItemCaseSensitive(o, key);
+    if (!it || !cJSON_IsNumber(it))
+    {
+        return false;
+    }
+    *out = (u16)it->valuedouble;
+    return true;
+}
+
+static bool parse_float_item(const cJSON* o, const char* key, float* out)
+{
+    const cJSON* it = cJSON_GetObjectItemCaseSensitive(o, key);
+    if (!it || !cJSON_IsNumber(it))
+    {
+        return false;
+    }
+    *out = (float)it->valuedouble;
+    return true;
+}
+
+static bool parse_bool_item(const cJSON* o, const char* key, bool* out)
+{
+    const cJSON* it = cJSON_GetObjectItemCaseSensitive(o, key);
+    if (!it)
+    {
+        return false;
+    }
+    if (cJSON_IsBool(it))
+    {
+        *out = cJSON_IsTrue(it);
+        return true;
+    }
+    if (cJSON_IsNumber(it))
+    {
+        *out = it->valuedouble != 0.0;
+        return true;
+    }
+    return false;
+}
+
+bool dyn_playback_set_config_json(const char* json_object)
+{
+    if (dyn_playback_is_armed())
+    {
+        ESP_LOGW(TAG, "dyn.set rejected: playback armed");
+        return false;
+    }
+
+    cJSON* root = cJSON_Parse(json_object);
+    if (!root || !cJSON_IsObject(root))
+    {
+        ESP_LOGE(TAG, "dyn.set: invalid JSON");
+        if (root)
+        {
+            cJSON_Delete(root);
+        }
+        return false;
+    }
+
+    portENTER_CRITICAL(&s_cfg_mu);
+    DynPlaybackConfig c = s_cfg;
+    portEXIT_CRITICAL(&s_cfg_mu);
+
+    u32 u32v = 0;
+    u16 u16v = 0;
+    float fv = 0.f;
+    bool bv = false;
+
+    if (parse_u32(root, "rate_hz", &u32v))
+    {
+        c.rate_hz = u32v;
+    }
+    if (parse_u16_loose(root, "bits", &u16v))
+    {
+        c.bits = u16v;
+    }
+    if (parse_float_item(root, "gain_db", &fv))
+    {
+        c.gain_db = fv;
+    }
+    if (parse_bool_item(root, "mute", &bv))
+    {
+        c.mute = bv;
+    }
+    if (parse_bool_item(root, "clip", &bv))
+    {
+        c.clip = bv;
+    }
+
+    cJSON_Delete(root);
+
+    if (!dyn_rate_allowed(c.rate_hz))
+    {
+        ESP_LOGE(TAG, "dyn.set: rate_hz not allowed (%u)", (unsigned)c.rate_hz);
+        return false;
+    }
+    if (c.bits != 16)
+    {
+        ESP_LOGE(TAG, "dyn.set: bits must be 16");
+        return false;
+    }
+
+    if (dyn_i2s_tx_init_from_config(c) != ESP_OK)
+    {
+        ESP_LOGE(TAG, "dyn.set: I2S reinit failed");
+        return false;
+    }
+
+    portENTER_CRITICAL(&s_cfg_mu);
+    s_cfg = c;
+    portEXIT_CRITICAL(&s_cfg_mu);
+
+    ESP_LOGI(TAG, "dyn.set: %u Hz, gain=%.2f dB, mute=%d, clip=%d", (unsigned)c.rate_hz, c.gain_db,
+             c.mute ? 1 : 0, c.clip ? 1 : 0);
+    return true;
 }

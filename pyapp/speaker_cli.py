@@ -54,10 +54,40 @@ def main() -> int:
         default=15.0,
         help="Таймаут ожидания DYN_ON_OK / DYN_OFF_OK",
     )
+    parser.add_argument(
+        "--dyn-rate",
+        type=int,
+        default=VkorobkaClient.DYN_PCM_SAMPLE_RATE_HZ,
+        help="Частота dyn.set / PCM (белый список как на ESP32)",
+    )
+    parser.add_argument(
+        "--dyn-bits",
+        type=int,
+        default=16,
+        choices=(16,),
+        help="Разрядность (на устройстве поддерживается 16)",
+    )
+    parser.add_argument(
+        "--dyn-gain-db",
+        type=float,
+        default=0.0,
+        help="Усиление на ESP32 (dyn.set gain_db)",
+    )
+    parser.add_argument(
+        "--skip-dyn-set",
+        action="store_true",
+        help="Не отправлять dyn.set (уже настроено на устройстве)",
+    )
     args = parser.parse_args()
 
     if not 1 <= args.chunk_samples <= 512:
         print("--chunk-samples must be 1..512", file=sys.stderr)
+        return 2
+    if args.dyn_rate not in VkorobkaClient.DYN_ALLOWED_SAMPLE_RATES_HZ:
+        print(
+            f"--dyn-rate must be one of {sorted(VkorobkaClient.DYN_ALLOWED_SAMPLE_RATES_HZ)}",
+            file=sys.stderr,
+        )
         return 2
 
     client = VkorobkaClient(
@@ -73,6 +103,10 @@ def main() -> int:
             pace=not args.no_pace,
             pace_factor=args.pace_factor,
             command_timeout=args.command_timeout,
+            dyn_rate_hz=args.dyn_rate,
+            dyn_bits=args.dyn_bits,
+            dyn_gain_db=args.dyn_gain_db,
+            send_dyn_set=not args.skip_dyn_set,
         )
         return 0 if ok else 1
     finally:

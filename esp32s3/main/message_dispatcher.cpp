@@ -71,6 +71,58 @@ void message_dispatcher_handle_new_message(const msg_header_t* header, const u8*
         {
             memcpy(vbuf, payload, payload_len);
             vbuf[payload_len] = '\0';
+            if (strncmp(vbuf, "voice.set", 9) == 0 &&
+                (vbuf[9] == '\0' || vbuf[9] == ' ' || vbuf[9] == '\t' || vbuf[9] == '{'))
+            {
+                const char* p = vbuf + 9;
+                while (*p == ' ' || *p == '\t')
+                {
+                    ++p;
+                }
+                const bool ok = (*p == '{') && mic_stream_set_config_json(p);
+                free(vbuf);
+                if (g_message_bridge)
+                {
+                    const char* ack = ok ? "VOICE_SET_OK" : "VOICE_SET_ERR";
+                    msg_header_t rh = msg_create_header(
+                        MSG_TYPE_RESPONSE,
+                        MSG_SRC_ESP32,
+                        MSG_DST_EXTERNAL,
+                        128,
+                        0,
+                        (u32)strlen(ack),
+                        0,
+                        MSG_ROUTE_NONE);
+                    g_message_bridge->send_message(rh, reinterpret_cast<const u8*>(ack), (u32)strlen(ack));
+                }
+                return;
+            }
+            if (strncmp(vbuf, "dyn.set", 7) == 0 &&
+                (vbuf[7] == '\0' || vbuf[7] == ' ' || vbuf[7] == '\t' || vbuf[7] == '{'))
+            {
+                const char* p = vbuf + 7;
+                while (*p == ' ' || *p == '\t')
+                {
+                    ++p;
+                }
+                const bool ok = (*p == '{') && dyn_playback_set_config_json(p);
+                free(vbuf);
+                if (g_message_bridge)
+                {
+                    const char* ack = ok ? "DYN_SET_OK" : "DYN_SET_ERR";
+                    msg_header_t rh = msg_create_header(
+                        MSG_TYPE_RESPONSE,
+                        MSG_SRC_ESP32,
+                        MSG_DST_EXTERNAL,
+                        128,
+                        0,
+                        (u32)strlen(ack),
+                        0,
+                        MSG_ROUTE_NONE);
+                    g_message_bridge->send_message(rh, reinterpret_cast<const u8*>(ack), (u32)strlen(ack));
+                }
+                return;
+            }
             if (strcmp(vbuf, "voice.on") == 0)
             {
                 free(vbuf);
