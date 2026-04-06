@@ -33,9 +33,11 @@ class MicSignalPlotWindow:
 
         self._lock = threading.Lock()
         self._history_samples = np.array([], dtype=np.int32)
+        self._history_threshold = np.array([], dtype=np.float32)
         self._sample_rate = 0
         self._bits = 0
         self._avg_abs = 0.0
+        self._noise_floor_ema = 0.0
         self._tap_token = None
         self._history_limit = 240000  # до ~5 сек при 48kHz
 
@@ -53,8 +55,21 @@ class MicSignalPlotWindow:
         ttk.Label(ctrl, text="Точек отрисовки").grid(row=0, column=6, padx=4, pady=2, sticky=tk.W)
         self.max_points_var = tk.StringVar(value="3000")
         ttk.Entry(ctrl, textvariable=self.max_points_var, width=8).grid(row=0, column=7, padx=4, pady=2, sticky=tk.W)
+        self.thr_adaptive_var = tk.BooleanVar(value=True)
+        ttk.Checkbutton(ctrl, text="Порог: адаптивный", variable=self.thr_adaptive_var).grid(
+            row=1, column=0, columnspan=2, padx=4, pady=2, sticky=tk.W
+        )
+        ttk.Label(ctrl, text="Базовый порог").grid(row=1, column=2, padx=4, pady=2, sticky=tk.W)
+        self.thr_base_var = tk.StringVar(value="6000")
+        ttk.Entry(ctrl, textvariable=self.thr_base_var, width=10).grid(row=1, column=3, padx=4, pady=2, sticky=tk.W)
+        ttk.Label(ctrl, text="alpha").grid(row=1, column=4, padx=4, pady=2, sticky=tk.W)
+        self.thr_alpha_var = tk.StringVar(value="0.04")
+        ttk.Entry(ctrl, textvariable=self.thr_alpha_var, width=8).grid(row=1, column=5, padx=4, pady=2, sticky=tk.W)
+        ttk.Label(ctrl, text="множитель").grid(row=1, column=6, padx=4, pady=2, sticky=tk.W)
+        self.thr_mul_var = tk.StringVar(value="2.2")
+        ttk.Entry(ctrl, textvariable=self.thr_mul_var, width=8).grid(row=1, column=7, padx=4, pady=2, sticky=tk.W)
         ttk.Label(ctrl, text="(0 = авто/без ограничения где применимо)").grid(
-            row=1, column=0, columnspan=8, padx=4, pady=(0, 4), sticky=tk.W
+            row=2, column=0, columnspan=8, padx=4, pady=(0, 4), sticky=tk.W
         )
 
         info = ttk.Frame(self.top)
@@ -83,18 +98,38 @@ class MicSignalPlotWindow:
             rate, block, bits = parse_mic_stream_payload(payload)
             arr = np.asarray(block, dtype=np.int32 if bits == 24 else np.int16).ravel()
             avg_abs = float(np.mean(np.abs(arr))) if arr.size else 0.0
+            thr = self._calc_threshold(avg_abs)
             with self._lock:
                 if self._history_samples.size == 0:
                     self._history_samples = arr.astype(np.int32, copy=False)
+                    self._history_threshold = np.full(arr.shape[0], thr, dtype=np.float32)
                 else:
                     self._history_samples = np.concatenate((self._history_samples, arr.astype(np.int32, copy=False)))
+                    thr_append = np.full(arr.shape[0], thr, dtype=np.float32)
+                    self._history_threshold = np.concatenate((self._history_threshold, thr_append))
                     if self._history_samples.size > self._history_limit:
-                        self._history_samples = self._history_samples[-self._history_limit :]
+                        self._history_samples = self._history_samples[-self._history_limit:]
+                        self._history_threshold = self._history_threshold[-self._history_limit:]
                 self._sample_rate = int(rate)
                 self._bits = int(bits)
                 self._avg_abs = avg_abs
         except Exception:
             return
+
+    def _calc_threshold(self, level: float) -> float:
+        base_thr = float(self._safe_int(self.thr_base_var.get(), 6000, min_v=0, max_v=1_000_000_000))
+        if not self.thr_adaptive_var.get():
+            self._noise_floor_ema = 0.0
+            return base_thr
+        alpha = self._safe_float(self.thr_alpha_var.get(), 0.04, min_v=0.001, max_v=0.5)
+        mul = self._safe_float(self.thr_mul_var.get(), 2.2, min_v=1.0, max_v=100.0)
+        if self._noise_floor_ema <= 0.0:
+            self._noise_floor_ema = level
+        else:
+            quiet_gate = self._noise_floor_ema * 1.5
+            eff_alpha = alpha if level <= quiet_gate else alpha * 0.1
+            self._noise_floor_ema = (1.0 - eff_alpha) * self._noise_floor_ema + eff_alpha * level
+        return max(base_thr, self._noise_floor_ema * mul)
 
     def _schedule_redraw(self) -> None:
         if not self.top.winfo_exists():
@@ -105,6 +140,7 @@ class MicSignalPlotWindow:
     def _redraw(self) -> None:
         with self._lock:
             samples = self._history_samples.copy()
+            thresholds = self._history_threshold.copy()
             sr = self._sample_rate
             bits = self._bits
             avg_abs = self._avg_abs
@@ -136,13 +172,16 @@ class MicSignalPlotWindow:
         else:
             n_visible = max(1, int(round(n_total / x_zoom)))
         window = samples[-n_visible:]
+        thr_window = thresholds[-n_visible:] if thresholds.size else np.array([], dtype=np.float32)
 
         max_points = self._safe_int(self.max_points_var.get(), 3000, min_v=0, max_v=100000)
         if max_points > 0 and n_visible > max_points:
             step = int(np.ceil(n_visible / float(max_points)))
             view = window[::step]
+            thr_view = thr_window[::step] if thr_window.size else np.array([], dtype=np.float32)
         else:
             view = window
+            thr_view = thr_window
             step = 1
 
         y_half = self._safe_int(self.y_half_range_var.get(), 0, min_v=0, max_v=max_amp)
@@ -171,10 +210,22 @@ class MicSignalPlotWindow:
                 pts.extend((x, y))
             self.canvas.create_line(*pts, fill="#0b66d0", width=1)
 
+        if thr_view.size > 1:
+            thr_pts = []
+            denom_thr = max(1, thr_view.size - 1)
+            for i, tv in enumerate(thr_view):
+                x = left + (i / denom_thr) * (right - left)
+                vv = max(-y_half, min(y_half, float(tv)))
+                y = top + (1.0 - ((vv + y_half) / (2.0 * y_half))) * (bottom - top)
+                thr_pts.extend((x, y))
+            self.canvas.create_line(*thr_pts, fill="#d62828", width=2)
+            self.canvas.create_text(right - 120, top + 12, text="Порог тишины", fill="#d62828", anchor=tk.W)
+
         dur_ms = (n_visible / float(sr) * 1000.0) if sr > 0 else 0.0
         self.info_var.set(
             f"sample_rate={sr} Hz, bits={bits}, history={n_total}, visible={n_visible}, "
-            f"avg_abs={avg_abs:.1f}, окно≈{dur_ms:.1f} мс, step={step}, y_half={y_half}"
+            f"avg_abs={avg_abs:.1f}, порог={float(thr_view[-1]) if thr_view.size else 0.0:.1f}, "
+            f"окно≈{dur_ms:.1f} мс, step={step}, y_half={y_half}"
         )
 
     @staticmethod
