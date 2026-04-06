@@ -14,7 +14,10 @@ def main() -> int:
     Основная функция CLI скрипта.
     """
     parser = argparse.ArgumentParser(
-        description='Управление текстингом на дисплее ILI9486',
+        description=(
+            "CLI для управления текстовым полем на дисплее ESP32: "
+            "очистка поля и печать текста через TEXT_CLEAR/TEXT_ADD."
+        ),
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog="""
 Примеры использования:
@@ -30,6 +33,13 @@ def main() -> int:
 
   # С указанием шрифта
   python texting_cli.py --command add_text --text "Test" --font-path fonts/custom.ttf
+
+  # Регенерация кэша символов + печать
+  python texting_cli.py --command add_text --text "Привет" --regen-font --char-height 16
+
+Примечания:
+  - Перед запуском нужен активный win-x64 (UDP host/port).
+  - По умолчанию команды отправляются в destination=esp32.
         """
     )
     

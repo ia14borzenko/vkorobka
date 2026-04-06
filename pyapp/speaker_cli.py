@@ -25,7 +25,14 @@ from vkorobka_client import VkorobkaClient
 
 def main() -> int:
     parser = argparse.ArgumentParser(
-        description="Вывод WAV/FLAC на динамик ESP32 (22050 Hz, PCM16 по протоколу vkorobka)"
+        description="Отправка аудиофайла на динамик ESP32 (dyn.on -> PCM stream -> dyn.off).",
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+        epilog=(
+            "Примеры:\n"
+            "  python speaker_cli.py path/to/track.wav\n"
+            "  python speaker_cli.py music.flac --dyn-rate 32000 --dyn-gain-db 3\n"
+            "  python speaker_cli.py track.wav --no-pace --chunk-samples 256\n"
+        ),
     )
     parser.add_argument("audio_file", type=Path, help="WAV, FLAC и др. (через soundfile)")
     parser.add_argument("--host", default="127.0.0.1", help="UDP хост win-x64")

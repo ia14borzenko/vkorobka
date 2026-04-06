@@ -13,7 +13,13 @@ from image_utils import (
 )
 
 
-def test_component(client: VkorobkaClient, destination: str, original_image: bytes, component_name: str):
+def test_component(
+    client: VkorobkaClient,
+    destination: str,
+    original_image: bytes,
+    component_name: str,
+    show_images: bool = True,
+):
     """
     Тестирует один компонент системы
     
@@ -65,9 +71,10 @@ def test_component(client: VkorobkaClient, destination: str, original_image: byt
     print(f"   Полученное изображение: {len(received_image)} байт")
     
     # Показываем изображения
-    display_image(original_image, f"Исходное изображение ({component_name})")
-    time.sleep(0.5)  # Небольшая задержка между отображениями
-    display_image(received_image, f"Ответ от {component_name}")
+    if show_images:
+        display_image(original_image, f"Исходное изображение ({component_name})")
+        time.sleep(0.5)  # Небольшая задержка между отображениями
+        display_image(received_image, f"Ответ от {component_name}")
     
     return True
 
@@ -75,7 +82,49 @@ def test_component(client: VkorobkaClient, destination: str, original_image: byt
 def main():
     """Основная функция"""
     # Парсинг аргументов командной строки
-    parser = argparse.ArgumentParser(description='VKOROBKA Component Test Application')
+    parser = argparse.ArgumentParser(
+        description=(
+            "Проверка базовой цепочки pyapp -> win-x64 -> esp32: "
+            "отправка тестового JPG и валидация зеркального ответа."
+        ),
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+        epilog=(
+            "Примеры:\n"
+            "  python main.py\n"
+            "  python main.py --host 127.0.0.1 --port 1236 --timeout 2.0 --size-kb 4\n"
+            "\n"
+            "Примечание:\n"
+            "  Скрипт тестирует оба направления: destination='win' и destination='esp32'."
+        ),
+    )
+    parser.add_argument(
+        "--host",
+        default="127.0.0.1",
+        help="UDP host win-x64 (по умолчанию: 127.0.0.1)",
+    )
+    parser.add_argument(
+        "--port",
+        type=int,
+        default=1236,
+        help="UDP порт win-x64 (по умолчанию: 1236)",
+    )
+    parser.add_argument(
+        "--timeout",
+        type=float,
+        default=2.0,
+        help="Таймаут ожидания ответа (сек), по умолчанию: 2.0",
+    )
+    parser.add_argument(
+        "--size-kb",
+        type=int,
+        default=4,
+        help="Размер тестового JPG в КБ (по умолчанию: 4)",
+    )
+    parser.add_argument(
+        "--no-display",
+        action="store_true",
+        help="Не открывать окна предпросмотра изображений (только консольный отчёт)",
+    )
     args = parser.parse_args()
     
     print("="*60)
@@ -83,16 +132,18 @@ def main():
     print("="*60)
     
     # Генерируем тестовое изображение
-    print("\n[init] Генерация тестового изображения (4 КБ)...")
-    test_image = generate_test_image(size_kb=4)
+    size_kb = max(1, int(args.size_kb))
+    print(f"\n[init] Генерация тестового изображения ({size_kb} КБ)...")
+    test_image = generate_test_image(size_kb=size_kb)
     print(f"[init] Изображение сгенерировано: {len(test_image)} байт ({len(test_image)/1024:.2f} КБ)")
     
     # Показываем исходное изображение
-    display_image(test_image, "Исходное тестовое изображение")
+    if not args.no_display:
+        display_image(test_image, "Исходное тестовое изображение")
     
     # Создаем клиент
     print("\n[init] Подключение к win-x64 приложению...")
-    client = VkorobkaClient(server_host='127.0.0.1', server_port=1236, timeout=2.0)
+    client = VkorobkaClient(server_host=args.host, server_port=args.port, timeout=args.timeout)
     
     try:
         # Результаты тестов
@@ -104,11 +155,15 @@ def main():
         
         # Тест 1: win-x64
         # Тест 1: win-x64
-        results['win'] = test_component(client, 'win', test_image, 'Windows (win-x64)')
+        results['win'] = test_component(
+            client, 'win', test_image, 'Windows (win-x64)', show_images=not args.no_display
+        )
         time.sleep(1)  # Пауза между тестами
         
         # Тест 2: esp32
-        results['esp32'] = test_component(client, 'esp32', test_image, 'ESP32')
+        results['esp32'] = test_component(
+            client, 'esp32', test_image, 'ESP32', show_images=not args.no_display
+        )
         
         # Итоговый отчет
         print(f"\n{'='*60}")

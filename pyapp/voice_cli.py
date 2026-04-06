@@ -137,7 +137,24 @@ def write_samples_table(path: Path, samples: Any, bits: int) -> None:
 
 
 def main() -> int:
-    parser = argparse.ArgumentParser(description="Запись голоса с ESP32 в FLAC + TSV")
+    parser = argparse.ArgumentParser(
+        description=(
+            "Интерактивная запись аудиопотока с ESP32 (voice.on/voice.off) "
+            "с сохранением в FLAC/WAV и таблицу TSV."
+        ),
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+        epilog=(
+            "Примеры:\n"
+            "  python voice_cli.py -o capture.flac\n"
+            "  python voice_cli.py --mic-rate 48000 --mic-bits 24 --chunk-samples 512\n"
+            "  python voice_cli.py --record-gain-db 6 --table-output capture.tsv\n"
+            "\n"
+            "После запуска доступны команды в консоли:\n"
+            "  voice.on   - старт записи\n"
+            "  voice.off  - остановка и сохранение\n"
+            "  quit       - выход\n"
+        ),
+    )
     parser.add_argument("--host", default="127.0.0.1", help="UDP win-x64")
     parser.add_argument("--port", type=int, default=1236, help="UDP порт win-x64")
     parser.add_argument(
