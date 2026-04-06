@@ -45,6 +45,9 @@ class VoiceConfig:
     stop_mode: str = "silence"  # silence|external
     silence_threshold: float = 6000.0
     silence_seconds: float = 3.0
+    silence_adaptive: bool = True
+    silence_noise_alpha: float = 0.04
+    silence_multiplier: float = 2.2
 
 
 class SmartSpeakerOrchestrator:
@@ -85,6 +88,7 @@ class SmartSpeakerOrchestrator:
         self._stop_capture_requested = False
         self._voice_stream_started = False
         self._render_in_progress = False
+        self._noise_floor_ema = 0.0
 
     def start(self) -> None:
         with self._lock:
@@ -160,6 +164,7 @@ class SmartSpeakerOrchestrator:
             self._chunks.clear()
             self._last_above_threshold_ts = time.time()
             self._stop_capture_requested = False
+            self._noise_floor_ema = 0.0
         self._set_state(self.STATE_CAPTURE)
         self.log("[smart] Запись запроса началась")
 
@@ -207,14 +212,28 @@ class SmartSpeakerOrchestrator:
             with self._lock:
                 self._chunks.append((arr, bits))
                 if vc.stop_mode == "silence":
-                    if level >= vc.silence_threshold:
+                    if vc.silence_adaptive:
+                        alpha = max(0.001, min(0.5, float(vc.silence_noise_alpha)))
+                        if self._noise_floor_ema <= 0.0:
+                            self._noise_floor_ema = level
+                        else:
+                            # Простая защита от "подхвата речи" в шумовой floor:
+                            # при высоком уровне речь влияет значительно слабее.
+                            quiet_gate = self._noise_floor_ema * 1.5
+                            eff_alpha = alpha if level <= quiet_gate else alpha * 0.1
+                            self._noise_floor_ema = (1.0 - eff_alpha) * self._noise_floor_ema + eff_alpha * level
+                        dynamic_thr = self._noise_floor_ema * max(1.0, float(vc.silence_multiplier))
+                        thr = max(float(vc.silence_threshold), dynamic_thr)
+                    else:
+                        thr = float(vc.silence_threshold)
+                    if level >= thr:
                         self._last_above_threshold_ts = now
                     elif (
                         not self._stop_capture_requested
                         and (now - self._last_above_threshold_ts) >= vc.silence_seconds
                     ):
                         self._stop_capture_requested = True
-                        self.log("[smart] Тишина обнаружена, останавливаю запись")
+                        self.log(f"[smart] Тишина обнаружена (thr={thr:.1f}, lvl={level:.1f}), останавливаю запись")
                         self._stop_capture_async()
         except Exception as e:
             self.log(f"[smart] Ошибка парсинга микрофона: {e}")

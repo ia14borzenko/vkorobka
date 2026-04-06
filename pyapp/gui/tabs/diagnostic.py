@@ -58,7 +58,7 @@ class DiagnosticTab(ttk.Frame):
             dest, valid, msg = result
             self.session.log(f"[diag] {dest}: {msg}")
             if valid:
-                messagebox.showinfo("Диагностика", f"{dest}: OK\n{msg}")
+                self.session.status(f"Диагностика: {dest} OK ({msg}).")
             else:
                 messagebox.showwarning("Диагностика", f"{dest}: {msg}")
 

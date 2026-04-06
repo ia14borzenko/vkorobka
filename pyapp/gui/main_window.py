@@ -220,6 +220,7 @@ def main() -> None:
 
     lf = ttk.LabelFrame(root, text="Журнал")
     log_widget = scrolledtext.ScrolledText(lf, height=11, wrap=tk.WORD)
+    status_var = tk.StringVar(value="Готово.")
 
     def log(msg: str) -> None:
         def append() -> None:
@@ -229,6 +230,7 @@ def main() -> None:
         root.after(0, append)
 
     session = AppSession(log)
+    session.set_status_callback(lambda msg: root.after(0, lambda: status_var.set(msg)))
 
     nb = ttk.Notebook(root)
     nb.pack(fill=tk.BOTH, expand=True, padx=4, pady=4)
@@ -241,8 +243,24 @@ def main() -> None:
     nb.add(SmartSpeakerTab(nb, session, root), text="Умная колонка")
     nb.add(DiagnosticTab(nb, session, root), text="Диагностика")
 
+    log_tools = ttk.Frame(lf)
+    log_tools.pack(fill=tk.X, padx=4, pady=(4, 0))
+
+    def copy_main_log() -> None:
+        try:
+            text = log_widget.get("1.0", tk.END).strip()
+            root.clipboard_clear()
+            root.clipboard_append(text)
+            status_var.set("Журнал скопирован в буфер обмена.")
+        except Exception as e:
+            messagebox.showerror("Журнал", str(e))
+
+    ttk.Button(log_tools, text="Скопировать журнал", command=copy_main_log).pack(side=tk.LEFT)
+
     lf.pack(fill=tk.BOTH, expand=False, padx=4, pady=(0, 4), side=tk.BOTTOM)
     log_widget.pack(fill=tk.BOTH, expand=True, padx=4, pady=4)
+    status_bar = ttk.Label(root, textvariable=status_var, anchor=tk.W, relief=tk.SUNKEN)
+    status_bar.pack(fill=tk.X, side=tk.BOTTOM, padx=4, pady=(0, 4))
 
     def on_close() -> None:
         session.disconnect()

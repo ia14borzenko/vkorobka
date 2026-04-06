@@ -87,10 +87,10 @@ class DisplayTab(ttk.Frame):
         def ok(resp):
             if resp is None:
                 self.session.log("[display] Нет ответа (таймаут).")
-                messagebox.showinfo("Дисплей", "Нет финального ответа (таймаут).")
+                self.session.status("Дисплей: нет финального ответа (таймаут).")
             else:
                 self.session.log(f"[display] Ответ: type={resp.get('type')}")
-                messagebox.showinfo("Дисплей", "Кадр отправлен.")
+                self.session.status("Дисплей: кадр отправлен.")
 
         def err(e):
             self.session.log(f"[display] Ошибка: {e}")

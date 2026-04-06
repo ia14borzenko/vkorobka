@@ -132,7 +132,7 @@ class SpeakerTab(ttk.Frame):
         def ok(ok_flag: bool):
             if ok_flag:
                 self.session.log("[speaker] Готово")
-                messagebox.showinfo("Динамик", "Воспроизведение завершено.")
+                self.session.status("Динамик: воспроизведение завершено.")
             else:
                 self.session.log("[speaker] Ошибка или таймаут")
                 messagebox.showwarning("Динамик", "Воспроизведение не завершилось успешно.")

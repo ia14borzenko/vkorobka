@@ -10,6 +10,7 @@ from vkorobka_client import VkorobkaClient
 class AppSession:
     def __init__(self, log: Callable[[str], None]):
         self._log = log
+        self._status: Optional[Callable[[str], None]] = None
         self.host: str = "127.0.0.1"
         self.port: int = 1236
         self.timeout: float = 30.0
@@ -19,6 +20,14 @@ class AppSession:
 
     def log(self, msg: str) -> None:
         self._log(msg)
+
+    def set_status_callback(self, cb: Callable[[str], None]) -> None:
+        self._status = cb
+
+    def status(self, msg: str) -> None:
+        if self._status:
+            self._status(msg)
+        self._log(f"[status] {msg}")
 
     @property
     def client(self) -> Optional[VkorobkaClient]:

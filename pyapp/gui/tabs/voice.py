@@ -231,11 +231,11 @@ class VoiceTab(ttk.Frame):
             resp, n, sr, br, op, wp, tp = result
             self.session.log(f"[voice] Стоп: {_preview_resp(resp)}")
             if n == 0:
-                messagebox.showinfo("Микрофон", "Нет сэмплов — файлы не созданы.")
+                self.session.status("Микрофон: нет сэмплов, файлы не созданы.")
             else:
                 self._last_wav_path = Path(wp)
                 self.session.log(f"[voice] Сохранено: {n} samples, {sr} Hz, {br}-bit")
-                messagebox.showinfo("Микрофон", f"Сохранено {n} сэмплов.\nFLAC/WAV/TSV:\n{op}\n{wp}\n{tp}")
+                self.session.status(f"Микрофон: сохранено {n} сэмплов ({sr} Hz, {br}-bit).")
 
         def err(e):
             self.btn_start.configure(state=tk.NORMAL)

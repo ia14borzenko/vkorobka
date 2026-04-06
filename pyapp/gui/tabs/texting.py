@@ -155,7 +155,7 @@ class TextingTab(ttk.Frame):
 
         def ok(_):
             self.session.log("[texting] Поле очищено")
-            messagebox.showinfo("Текстинг", "Готово.")
+            self.session.status("Текстинг: поле очищено.")
 
         def err(e):
             self.session.log(f"[texting] Ошибка: {e}")
@@ -177,7 +177,7 @@ class TextingTab(ttk.Frame):
 
         def ok(_):
             self.session.log("[texting] Текст отправлен")
-            messagebox.showinfo("Текстинг", "Готово.")
+            self.session.status("Текстинг: текст отправлен.")
 
         def err(e):
             self.session.log(f"[texting] Ошибка: {e}")

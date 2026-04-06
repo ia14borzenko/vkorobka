@@ -31,6 +31,9 @@ class SmartSpeakerTab(ttk.Frame):
         self.stop_mode_var = tk.StringVar(value="silence")
         self.silence_threshold_var = tk.StringVar(value="6000")
         self.silence_wait_var = tk.StringVar(value="3.0")
+        self.silence_adaptive_var = tk.BooleanVar(value=True)
+        self.silence_noise_alpha_var = tk.StringVar(value="0.04")
+        self.silence_multiplier_var = tk.StringVar(value="2.2")
         self.text_mode_var = tk.StringVar(value="auto")
         self.manual_cps_var = tk.StringVar(value="20")
         self.auto_min_cps_var = tk.StringVar(value="8")
@@ -69,6 +72,13 @@ class SmartSpeakerTab(ttk.Frame):
         ttk.Entry(vf, textvariable=self.silence_threshold_var, width=10).grid(row=1, column=1, sticky=tk.W, padx=4, pady=2)
         ttk.Label(vf, text="Ожидание тишины, сек").grid(row=1, column=2, sticky=tk.W, padx=4, pady=2)
         ttk.Entry(vf, textvariable=self.silence_wait_var, width=10).grid(row=1, column=3, sticky=tk.W, padx=4, pady=2)
+        ttk.Checkbutton(vf, text="Адаптивный порог по шуму", variable=self.silence_adaptive_var).grid(
+            row=2, column=0, columnspan=2, sticky=tk.W, padx=4, pady=2
+        )
+        ttk.Label(vf, text="alpha шума (EMA)").grid(row=2, column=2, sticky=tk.W, padx=4, pady=2)
+        ttk.Entry(vf, textvariable=self.silence_noise_alpha_var, width=10).grid(row=2, column=3, sticky=tk.W, padx=4, pady=2)
+        ttk.Label(vf, text="множитель порога").grid(row=3, column=2, sticky=tk.W, padx=4, pady=2)
+        ttk.Entry(vf, textvariable=self.silence_multiplier_var, width=10).grid(row=3, column=3, sticky=tk.W, padx=4, pady=2)
         r += 1
 
         tf = ttk.LabelFrame(self, text="Скорость печати текста")
@@ -125,18 +135,7 @@ class SmartSpeakerTab(ttk.Frame):
         testf.columnconfigure(1, weight=1)
         r += 1
 
-        lf = ttk.LabelFrame(self, text="Журнал умной колонки")
-        lf.grid(row=r, column=0, columnspan=3, sticky=tk.NSEW, padx=4, pady=4)
-        lbf = ttk.Frame(lf)
-        lbf.pack(fill=tk.X, padx=4, pady=4)
-        ttk.Button(lbf, text="Скопировать лог", command=self._copy_log).pack(side=tk.LEFT)
-        self.local_log = scrolledtext.ScrolledText(lf, width=80, height=8, wrap=tk.WORD)
-        self.local_log.pack(fill=tk.BOTH, expand=True, padx=4, pady=(0, 4))
-        self.local_log.configure(state=tk.DISABLED)
-        r += 1
-
         self.columnconfigure(1, weight=1)
-        self.rowconfigure(r - 1, weight=1)
 
     def _browse_font(self) -> None:
         p = filedialog.askopenfilename(title="Шрифт", filetypes=[("Шрифты", "*.ttf *.otf"), ("Все файлы", "*.*")])
@@ -165,6 +164,9 @@ class SmartSpeakerTab(ttk.Frame):
             stop_mode=self.stop_mode_var.get().strip() or "silence",
             silence_threshold=self._f(self.silence_threshold_var, 6000.0),
             silence_seconds=self._f(self.silence_wait_var, 3.0),
+            silence_adaptive=self.silence_adaptive_var.get(),
+            silence_noise_alpha=self._f(self.silence_noise_alpha_var, 0.04),
+            silence_multiplier=self._f(self.silence_multiplier_var, 2.2),
         )
 
     def _collect_texting_cfg(self) -> TextingConfig:
@@ -237,20 +239,3 @@ class SmartSpeakerTab(ttk.Frame):
 
     def _log(self, msg: str) -> None:
         self.session.log(msg)
-
-        def append() -> None:
-            self.local_log.configure(state=tk.NORMAL)
-            self.local_log.insert(tk.END, msg + "\n")
-            self.local_log.see(tk.END)
-            self.local_log.configure(state=tk.DISABLED)
-
-        self.root.after(0, append)
-
-    def _copy_log(self) -> None:
-        try:
-            text = self.local_log.get("1.0", tk.END).strip()
-            self.root.clipboard_clear()
-            self.root.clipboard_append(text)
-            messagebox.showinfo("Журнал", "Лог вкладки скопирован в буфер обмена.")
-        except Exception as e:
-            messagebox.showerror("Журнал", str(e))
