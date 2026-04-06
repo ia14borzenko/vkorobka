@@ -636,6 +636,7 @@ class VkorobkaClient:
         dyn_mute: bool = False,
         dyn_clip: bool = True,
         send_dyn_set: bool = True,
+        on_chunk_sent: Optional[Callable[[int, int, float], None]] = None,
     ) -> bool:
         """
         Воспроизведение на динамик (MAX98357A): dyn.set (опц.) → dyn.on → STREAM stream_id=3
@@ -710,6 +711,7 @@ class VkorobkaClient:
 
         if chunk_samples < 1 or chunk_samples > 512:
             raise ValueError("chunk_samples must be 1..512")
+        total_chunks = (n_total + chunk_samples - 1) // chunk_samples
 
         tid_on = self.send_command("esp32", "dyn.on")
         resp_on = self.wait_for_response(tid_on, timeout=command_timeout)
@@ -718,10 +720,12 @@ class VkorobkaClient:
             return False
 
         seq = 0
+        chunk_send_total_s = 0.0
         for start in range(0, n_total, chunk_samples):
             block = samples_i16[start : start + chunk_samples]
             payload = self.pack_pcm16_stream_payload_mono_dyn(block, sample_rate_hz=target_sr)
             chunk_b64 = image_to_base64(payload)
+            t0 = time.perf_counter()
             self._send_stream_chunk(
                 destination="esp32",
                 stream_id=self.STREAM_ID_DYN_PCM,
@@ -731,6 +735,13 @@ class VkorobkaClient:
                 extra_fields=None,
                 verbose=False,
             )
+            chunk_send_total_s += max(0.0, time.perf_counter() - t0)
+            if on_chunk_sent is not None:
+                avg_chunk_send_s = chunk_send_total_s / float(seq + 1)
+                try:
+                    on_chunk_sent(seq, total_chunks, avg_chunk_send_s)
+                except Exception as e:
+                    print(f"[client] on_chunk_sent error: {e}", file=sys.stderr)
             seq += 1
             if pace and block.size > 0:
                 delay = (block.size / float(target_sr)) * pace_factor

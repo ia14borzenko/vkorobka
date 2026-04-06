@@ -278,10 +278,11 @@ class SmartSpeakerOrchestrator:
         err: Optional[Exception] = None
         try:
             # По новому UX не рисуем картинки в режиме ожидания/ответа.
-            # Критично: команды dyn.* и TEXT_* не должны уходить параллельно на текущее устройство.
-            # Выполняем последовательно, иначе получаем рассинхрон test_id/ACK на стороне шлюза.
-            self._play_audio_if_present(payload)
-            self._send_text_if_present(payload)
+            if payload.audio_path and payload.text:
+                self._play_audio_and_text_interleaved(payload)
+            else:
+                self._play_audio_if_present(payload)
+                self._send_text_if_present(payload)
             self.log("[smart] Вывод ответа завершен")
         except Exception as e:
             err = e
@@ -309,6 +310,67 @@ class SmartSpeakerOrchestrator:
             self.log("[smart] На дисплей выведено: ожидаем ответа ...")
         except Exception as e:
             self.log(f"[smart] Не удалось вывести текст ожидания: {e}")
+
+    def _play_audio_and_text_interleaved(self, payload: ResponsePayload) -> None:
+        path = Path(payload.audio_path) if payload.audio_path else None
+        if not path or not path.is_file():
+            self.log("[smart] interleave: аудио не найдено, отправляю только текст")
+            self._send_text_if_present(payload)
+            return
+
+        text = payload.text or ""
+        if not text:
+            self._play_audio_if_present(payload)
+            return
+
+        cfg = self.texting_cfg_getter()
+        manager = self._build_texting_manager(cfg, typing_speed_ms=1)
+        manager.clear_field()
+
+        duration_s = self._audio_duration_sec(path) or 0.0
+        chars = list(text)
+        n_chars = len(chars)
+        state = {
+            "idx": 0,
+            "chunk_interval": None,
+            "logged": False,
+        }
+
+        def on_chunk_sent(seq: int, total_chunks: int, avg_chunk_send_s: float) -> None:
+            if state["idx"] >= n_chars:
+                return
+            if state["chunk_interval"] is None:
+                if duration_s > 0.01:
+                    symbol_period_s = duration_s / float(n_chars)
+                    interval = int(round(symbol_period_s / max(1e-6, avg_chunk_send_s)))
+                else:
+                    interval = int(round(total_chunks / float(max(1, n_chars))))
+                state["chunk_interval"] = max(1, interval)
+                if not state["logged"]:
+                    self.log(
+                        "[smart] interleave: "
+                        f"chars={n_chars}, duration={duration_s:.3f}s, "
+                        f"avg_chunk_send={avg_chunk_send_s*1000.0:.3f}ms, "
+                        f"chunk_interval={state['chunk_interval']}"
+                    )
+                    state["logged"] = True
+
+            if seq % int(state["chunk_interval"]) == 0 and state["idx"] < n_chars:
+                manager.add_text(chars[state["idx"]])
+                state["idx"] += 1
+
+        client = self.client_getter()
+        ok = client.play_audio_file_to_esp32_dyn(
+            str(path),
+            on_chunk_sent=on_chunk_sent,
+        )
+        if not ok:
+            self.log("[smart] Предупреждение: interleave audio playback завершился с ошибкой")
+
+        # Досылаем хвост текста, если аудио кончилось раньше, чем символы.
+        while state["idx"] < n_chars:
+            manager.add_text(chars[state["idx"]])
+            state["idx"] += 1
 
     def _play_audio_if_present(self, payload: ResponsePayload) -> None:
         if not payload.audio_path:

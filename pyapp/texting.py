@@ -127,6 +127,7 @@ class TextingManager:
         # Отправляем весь текст сразу на ESP32
         if self.client:
             self._send_text_command(text, lines)
+            self._advance_cursor_state(text)
         else:
             print("[texting] Клиент не установлен, команда не отправлена")
     
@@ -322,3 +323,34 @@ class TextingManager:
             print("[texting] Предупреждение: timeout ожидания TEXT_ADD")
         
         print(f"[texting] Отправлена команда TEXT_ADD (test_id={test_id}), текст: '{text[:50]}...' (если длинный), символов: {len(chars_data)}")
+
+    def _advance_cursor_state(self, text: str) -> None:
+        """
+        Локально продвигает курсор после успешной отправки TEXT_ADD,
+        чтобы следующий TEXT_ADD продолжал печать, а не начинал с начала поля.
+        """
+        line_height = self.char_height + self.line_spacing
+        max_lines = max(1, self.max_lines)
+
+        for ch in text:
+            if ch == "\n":
+                self.cursor_x = 0
+                self.current_line_index += 1
+                self.cursor_y = self.current_line_index * line_height
+            else:
+                w = get_char_width(ch, self.font_cache)
+                if w <= 0:
+                    # Неизвестный символ в прошивке, на всякий случай двигаем на 1 пиксель.
+                    w = 1
+                if self.cursor_x + w > self.field_width:
+                    self.cursor_x = 0
+                    self.current_line_index += 1
+                    self.cursor_y = self.current_line_index * line_height
+                self.cursor_x += w
+
+            # Логика переполнения как в esp32 texting_render_task:
+            # при выходе за число строк устройство очищает первую строку и сбрасывает курсор.
+            if self.current_line_index >= max_lines:
+                self.cursor_x = 0
+                self.cursor_y = 0
+                self.current_line_index = 0
