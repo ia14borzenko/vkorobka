@@ -12,6 +12,10 @@ from typing import Any, Dict, List, Tuple
 from tkinter import messagebox, ttk
 
 import numpy as np
+try:
+    import winsound
+except Exception:  # pragma: no cover - non-Windows fallback
+    winsound = None
 
 from gui.threading_utils import run_in_thread
 from voice_cli import (
@@ -34,6 +38,7 @@ class VoiceTab(ttk.Frame):
         self._bits_ref: List[int] = [24]
         self._lock = threading.Lock()
         self._recording = threading.Event()
+        self._last_wav_path: Path | None = None
 
         r = 0
         ttk.Label(self, text="Выход FLAC (-o):").grid(row=r, column=0, sticky=tk.W, padx=4, pady=2)
@@ -87,6 +92,10 @@ class VoiceTab(ttk.Frame):
         self.btn_start.pack(side=tk.LEFT, padx=4)
         self.btn_stop = ttk.Button(bf, text="Стоп и сохранить (voice.off)", command=self._stop, state=tk.DISABLED)
         self.btn_stop.pack(side=tk.LEFT, padx=4)
+        self.btn_play_local = ttk.Button(bf, text="Прослушать WAV", command=self._play_local_wav)
+        self.btn_play_local.pack(side=tk.LEFT, padx=4)
+        self.btn_stop_local = ttk.Button(bf, text="Стоп прослушивания", command=self._stop_local_wav)
+        self.btn_stop_local.pack(side=tk.LEFT, padx=4)
 
         self.columnconfigure(1, weight=1)
 
@@ -224,6 +233,7 @@ class VoiceTab(ttk.Frame):
             if n == 0:
                 messagebox.showinfo("Микрофон", "Нет сэмплов — файлы не созданы.")
             else:
+                self._last_wav_path = Path(wp)
                 self.session.log(f"[voice] Сохранено: {n} samples, {sr} Hz, {br}-bit")
                 messagebox.showinfo("Микрофон", f"Сохранено {n} сэмплов.\nFLAC/WAV/TSV:\n{op}\n{wp}\n{tp}")
 
@@ -234,6 +244,40 @@ class VoiceTab(ttk.Frame):
             messagebox.showerror("Микрофон", str(e))
 
         run_in_thread(self.root, work, ok, err)
+
+    def _resolve_wav_for_playback(self) -> Path:
+        if self._last_wav_path and self._last_wav_path.is_file():
+            return self._last_wav_path
+        out = Path(self.out_var.get().strip() or "voice_capture.flac")
+        wav_path = out.with_suffix(".wav")
+        if wav_path.is_file():
+            return wav_path
+        raise FileNotFoundError("WAV файл не найден. Сначала выполните запись и сохранение.")
+
+    def _play_local_wav(self) -> None:
+        if winsound is None:
+            messagebox.showwarning("Микрофон", "Локальное прослушивание доступно только в Windows.")
+            return
+        try:
+            wav_path = self._resolve_wav_for_playback()
+        except FileNotFoundError as e:
+            messagebox.showwarning("Микрофон", str(e))
+            return
+        try:
+            winsound.PlaySound(str(wav_path), winsound.SND_FILENAME | winsound.SND_ASYNC)
+            self.session.log(f"[voice] Локальное прослушивание: {wav_path}")
+        except Exception as e:
+            self.session.log(f"[voice] Ошибка прослушивания: {e}")
+            messagebox.showerror("Микрофон", f"Не удалось воспроизвести WAV:\n{e}")
+
+    def _stop_local_wav(self) -> None:
+        if winsound is None:
+            return
+        try:
+            winsound.PlaySound(None, winsound.SND_PURGE)
+            self.session.log("[voice] Локальное прослушивание остановлено")
+        except Exception as e:
+            self.session.log(f"[voice] Ошибка остановки прослушивания: {e}")
 
 
 def filedialog_save_flac(parent) -> str | None:
