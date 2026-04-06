@@ -52,38 +52,10 @@ class VoiceTab(ttk.Frame):
         ttk.Entry(self, textvariable=self.tsv_var, width=44).grid(row=r, column=1, sticky=tk.EW, padx=4, pady=2)
         r += 1
 
-        mf = ttk.LabelFrame(self, text="voice.set / микрофон")
-        mf.grid(row=r, column=0, columnspan=3, sticky=tk.EW, padx=4, pady=4)
-        self.mic_rate_var = tk.StringVar(value="48000")
-        self.mic_bits_var = tk.StringVar(value="24")
-        self.mic_gain_var = tk.StringVar(value="3.0")
-        self.chunk_var = tk.StringVar(value="512")
-        self.record_gain_var = tk.StringVar(value="0.0")
-        self.mic_mute_var = tk.BooleanVar(value=False)
-        self.no_clip_var = tk.BooleanVar(value=False)
-
-        rr = 0
-        ttk.Label(mf, text="mic_rate_hz").grid(row=rr, column=0, sticky=tk.W, padx=4, pady=2)
-        ttk.Entry(mf, textvariable=self.mic_rate_var, width=10).grid(row=rr, column=1, sticky=tk.W, padx=4, pady=2)
-        ttk.Label(mf, text="mic_bits").grid(row=rr, column=2, sticky=tk.W, padx=4, pady=2)
-        ttk.Combobox(mf, textvariable=self.mic_bits_var, values=("16", "24"), width=6, state="readonly").grid(
-            row=rr, column=3, sticky=tk.W, padx=4, pady=2
-        )
-        rr += 1
-        ttk.Label(mf, text="mic_gain_db").grid(row=rr, column=0, sticky=tk.W, padx=4, pady=2)
-        ttk.Entry(mf, textvariable=self.mic_gain_var, width=10).grid(row=rr, column=1, sticky=tk.W, padx=4, pady=2)
-        ttk.Label(mf, text="chunk_samples").grid(row=rr, column=2, sticky=tk.W, padx=4, pady=2)
-        ttk.Entry(mf, textvariable=self.chunk_var, width=8).grid(row=rr, column=3, sticky=tk.W, padx=4, pady=2)
-        rr += 1
-        ttk.Label(mf, text="record_gain_db (только файл)").grid(row=rr, column=0, sticky=tk.W, padx=4, pady=2)
-        ttk.Entry(mf, textvariable=self.record_gain_var, width=10).grid(row=rr, column=1, sticky=tk.W, padx=4, pady=2)
-        ttk.Checkbutton(mf, text="mute (тишина в потоке)", variable=self.mic_mute_var).grid(
-            row=rr, column=2, columnspan=2, sticky=tk.W, padx=4, pady=2
-        )
-        rr += 1
-        ttk.Checkbutton(mf, text="clip:false (--no-mic-clip)", variable=self.no_clip_var).grid(
-            row=rr, column=0, columnspan=2, sticky=tk.W, padx=4, pady=2
-        )
+        ttk.Label(
+            self,
+            text="Параметры mic/voice берутся из левой панели общих настроек.",
+        ).grid(row=r, column=0, columnspan=3, sticky=tk.W, padx=4, pady=(2, 6))
         r += 1
 
         bf = ttk.Frame(self)
@@ -105,11 +77,11 @@ class VoiceTab(ttk.Frame):
             self.out_var.set(p)
 
     def _parse_mic_params(self):
-        mic_rate = int(self.mic_rate_var.get().strip())
-        mic_bits = int(self.mic_bits_var.get().strip())
-        mic_gain = float(self.mic_gain_var.get().strip())
-        chunk = int(self.chunk_var.get().strip())
-        record_gain = float(self.record_gain_var.get().strip())
+        mic_rate = int(self.session.mic_rate_hz)
+        mic_bits = int(self.session.mic_bits)
+        mic_gain = float(self.session.mic_gain_db)
+        chunk = int(self.session.mic_chunk_samples)
+        record_gain = float(self.session.mic_record_gain_db)
         if not 64 <= chunk <= 512:
             raise ValueError("chunk_samples: 64..512")
         if not 8000 <= mic_rate <= 96000:
@@ -160,8 +132,8 @@ class VoiceTab(ttk.Frame):
                 bits=mic_bits,
                 gain_db=mic_gain,
                 chunk_samples=chunk,
-                mute=self.mic_mute_var.get(),
-                clip=not self.no_clip_var.get(),
+                mute=self.session.mic_mute,
+                clip=self.session.mic_clip,
                 command_timeout=min(10.0, self.session.timeout),
             )
             if not ok:

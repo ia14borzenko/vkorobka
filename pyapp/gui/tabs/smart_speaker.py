@@ -7,7 +7,7 @@ from pathlib import Path
 from tkinter import filedialog, messagebox, scrolledtext, ttk
 
 from gui.backend_contract import MockBackendAdapter, ResponsePayload
-from gui.smart_speaker_orchestrator import SmartSpeakerOrchestrator, TextingConfig, VoiceConfig
+from gui.smart_speaker_orchestrator import SpeakerConfig, SmartSpeakerOrchestrator, TextingConfig, VoiceConfig
 
 
 class SmartSpeakerTab(ttk.Frame):
@@ -24,6 +24,7 @@ class SmartSpeakerTab(ttk.Frame):
             backend_adapter=self.backend,
             texting_cfg_getter=self._collect_texting_cfg,
             voice_cfg_getter=self._collect_voice_cfg,
+            speaker_cfg_getter=self._collect_speaker_cfg,
             state_changed=self._on_state_changed,
         )
 
@@ -49,6 +50,14 @@ class SmartSpeakerTab(ttk.Frame):
 
         self.audio_path_var = tk.StringVar(value="")
         self._build_ui()
+        for var in (
+            self.silence_threshold_var,
+            self.silence_noise_alpha_var,
+            self.silence_multiplier_var,
+        ):
+            var.trace_add("write", lambda *_: self._sync_silence_to_session())
+        self.silence_adaptive_var.trace_add("write", lambda *_: self._sync_silence_to_session())
+        self._sync_silence_to_session()
 
     def _build_ui(self) -> None:
         r = 0
@@ -159,14 +168,28 @@ class SmartSpeakerTab(ttk.Frame):
         except ValueError:
             return default
 
+    def _sync_silence_to_session(self) -> None:
+        self.session.smart_silence_threshold = self._f(self.silence_threshold_var, 6000.0)
+        self.session.smart_silence_adaptive = self.silence_adaptive_var.get()
+        self.session.smart_silence_noise_alpha = self._f(self.silence_noise_alpha_var, 0.04)
+        self.session.smart_silence_multiplier = self._f(self.silence_multiplier_var, 2.2)
+
     def _collect_voice_cfg(self) -> VoiceConfig:
+        self._sync_silence_to_session()
         return VoiceConfig(
+            rate_hz=int(self.session.mic_rate_hz),
+            bits=int(self.session.mic_bits),
+            gain_db=float(self.session.mic_gain_db),
+            chunk_samples=int(self.session.mic_chunk_samples),
+            mute=bool(self.session.mic_mute),
+            clip=bool(self.session.mic_clip),
+            record_gain_db=float(self.session.mic_record_gain_db),
             stop_mode=self.stop_mode_var.get().strip() or "silence",
-            silence_threshold=self._f(self.silence_threshold_var, 6000.0),
+            silence_threshold=self.session.smart_silence_threshold,
             silence_seconds=self._f(self.silence_wait_var, 3.0),
-            silence_adaptive=self.silence_adaptive_var.get(),
-            silence_noise_alpha=self._f(self.silence_noise_alpha_var, 0.04),
-            silence_multiplier=self._f(self.silence_multiplier_var, 2.2),
+            silence_adaptive=self.session.smart_silence_adaptive,
+            silence_noise_alpha=self.session.smart_silence_noise_alpha,
+            silence_multiplier=self.session.smart_silence_multiplier,
         )
 
     def _collect_texting_cfg(self) -> TextingConfig:
@@ -183,6 +206,19 @@ class SmartSpeakerTab(ttk.Frame):
             auto_speed=auto_mode,
             min_auto_cps=self._f(self.auto_min_cps_var, 8.0),
             max_auto_cps=self._f(self.auto_max_cps_var, 30.0),
+        )
+
+    def _collect_speaker_cfg(self) -> SpeakerConfig:
+        return SpeakerConfig(
+            chunk_samples=int(self.session.speaker_chunk_samples),
+            pace=not bool(self.session.speaker_no_pace),
+            pace_factor=float(self.session.speaker_pace_factor),
+            command_timeout_s=float(self.session.speaker_command_timeout_s),
+            dyn_rate_hz=int(self.session.speaker_dyn_rate_hz),
+            dyn_gain_db=float(self.session.speaker_dyn_gain_db),
+            dyn_mute=bool(self.session.speaker_dyn_mute),
+            dyn_clip=bool(self.session.speaker_dyn_clip),
+            send_dyn_set=not bool(self.session.speaker_skip_dyn_set),
         )
 
     def _on_state_changed(self, state: str) -> None:

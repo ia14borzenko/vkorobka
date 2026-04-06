@@ -17,6 +17,29 @@ class AppSession:
         self.verbose_udp: bool = False
         self.destination: str = "esp32"
         self._client: Optional[VkorobkaClient] = None
+        # Общие настройки микрофона (для всех вкладок/сценариев).
+        self.mic_rate_hz: int = 48000
+        self.mic_bits: int = 24
+        self.mic_gain_db: float = 3.0
+        self.mic_chunk_samples: int = 512
+        self.mic_mute: bool = False
+        self.mic_clip: bool = True
+        self.mic_record_gain_db: float = 0.0
+        # Общие настройки динамика (для всех вкладок/сценариев).
+        self.speaker_chunk_samples: int = 512
+        self.speaker_pace_factor: float = 0.97
+        self.speaker_no_pace: bool = False
+        self.speaker_command_timeout_s: float = 4.0
+        self.speaker_dyn_rate_hz: int = VkorobkaClient.DYN_PCM_SAMPLE_RATE_HZ
+        self.speaker_dyn_gain_db: float = 0.0
+        self.speaker_skip_dyn_set: bool = False
+        self.speaker_dyn_mute: bool = False
+        self.speaker_dyn_clip: bool = True
+        # Настройки адаптивного порога тишины (источник: вкладка "Умная колонка").
+        self.smart_silence_threshold: float = 6000.0
+        self.smart_silence_adaptive: bool = True
+        self.smart_silence_noise_alpha: float = 0.04
+        self.smart_silence_multiplier: float = 2.2
 
     def log(self, msg: str) -> None:
         self._log(msg)

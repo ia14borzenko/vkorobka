@@ -23,45 +23,11 @@ class SpeakerTab(ttk.Frame):
         ttk.Button(self, text="Обзор…", command=self._browse).grid(row=r, column=2, padx=4, pady=2)
         r += 1
 
-        f = ttk.LabelFrame(self, text="Параметры потока")
-        f.grid(row=r, column=0, columnspan=3, sticky=tk.EW, padx=4, pady=4)
-        rr = 0
-        ttk.Label(f, text="chunk_samples (1..512)").grid(row=rr, column=0, sticky=tk.W, padx=4, pady=2)
-        self.chunk_var = tk.StringVar(value="512")
-        ttk.Entry(f, textvariable=self.chunk_var, width=8).grid(row=rr, column=1, sticky=tk.W, padx=4, pady=2)
-        ttk.Label(f, text="pace_factor").grid(row=rr, column=2, sticky=tk.W, padx=4, pady=2)
-        self.pace_factor_var = tk.StringVar(value="0.97")
-        ttk.Entry(f, textvariable=self.pace_factor_var, width=8).grid(row=rr, column=3, sticky=tk.W, padx=4, pady=2)
-        rr += 1
-        self.no_pace_var = tk.BooleanVar(value=False)
-        ttk.Checkbutton(f, text="Без паузы между чанками (--no-pace)", variable=self.no_pace_var).grid(
-            row=rr, column=0, columnspan=2, sticky=tk.W, padx=4, pady=2
-        )
-        ttk.Label(f, text="command_timeout (с)").grid(row=rr, column=2, sticky=tk.W, padx=4, pady=2)
-        self.cmd_to_var = tk.StringVar(value="4.0")
-        ttk.Entry(f, textvariable=self.cmd_to_var, width=8).grid(row=rr, column=3, sticky=tk.W, padx=4, pady=2)
-        rr += 1
-
-        df = ttk.LabelFrame(self, text="dyn.set")
-        df.grid(row=r + 1, column=0, columnspan=3, sticky=tk.EW, padx=4, pady=4)
-        rates = sorted(VkorobkaClient.DYN_ALLOWED_SAMPLE_RATES_HZ)
-        ttk.Label(df, text="dyn_rate_hz").grid(row=0, column=0, sticky=tk.W, padx=4, pady=2)
-        self.rate_var = tk.StringVar(value=str(VkorobkaClient.DYN_PCM_SAMPLE_RATE_HZ))
-        ttk.Combobox(df, textvariable=self.rate_var, values=[str(x) for x in rates], width=10).grid(
-            row=0, column=1, sticky=tk.W, padx=4, pady=2
-        )
-        ttk.Label(df, text="dyn_gain_db").grid(row=0, column=2, sticky=tk.W, padx=4, pady=2)
-        self.gain_var = tk.StringVar(value="0.0")
-        ttk.Entry(df, textvariable=self.gain_var, width=8).grid(row=0, column=3, sticky=tk.W, padx=4, pady=2)
-        self.skip_dyn_set_var = tk.BooleanVar(value=False)
-        ttk.Checkbutton(df, text="Не отправлять dyn.set", variable=self.skip_dyn_set_var).grid(
-            row=1, column=0, columnspan=2, sticky=tk.W, padx=4, pady=2
-        )
-        self.dyn_mute_var = tk.BooleanVar(value=False)
-        ttk.Checkbutton(df, text="mute", variable=self.dyn_mute_var).grid(row=1, column=2, sticky=tk.W, padx=4, pady=2)
-        self.dyn_clip_var = tk.BooleanVar(value=True)
-        ttk.Checkbutton(df, text="clip", variable=self.dyn_clip_var).grid(row=1, column=3, sticky=tk.W, padx=4, pady=2)
-        r += 2
+        ttk.Label(
+            self,
+            text="Параметры динамика берутся из левой панели общих настроек.",
+        ).grid(row=r, column=0, columnspan=3, sticky=tk.W, padx=4, pady=(2, 8))
+        r += 1
 
         ttk.Button(self, text="Воспроизвести на ESP32", command=self._play).grid(
             row=r, column=0, columnspan=3, pady=12
@@ -89,15 +55,11 @@ class SpeakerTab(ttk.Frame):
         if not path or not Path(path).is_file():
             messagebox.showwarning("Динамик", "Укажите существующий файл.")
             return
-        try:
-            chunk = int(self.chunk_var.get().strip())
-            pace_factor = float(self.pace_factor_var.get().strip())
-            cmd_to = float(self.cmd_to_var.get().strip())
-            dyn_rate = int(self.rate_var.get().strip())
-            dyn_gain = float(self.gain_var.get().strip())
-        except ValueError:
-            messagebox.showwarning("Динамик", "Некорректные числовые поля.")
-            return
+        chunk = int(self.session.speaker_chunk_samples)
+        pace_factor = float(self.session.speaker_pace_factor)
+        cmd_to = float(self.session.speaker_command_timeout_s)
+        dyn_rate = int(self.session.speaker_dyn_rate_hz)
+        dyn_gain = float(self.session.speaker_dyn_gain_db)
         if not 1 <= chunk <= 512:
             messagebox.showwarning("Динамик", "chunk_samples: 1..512")
             return
@@ -108,8 +70,8 @@ class SpeakerTab(ttk.Frame):
             )
             return
 
-        no_pace = self.no_pace_var.get()
-        skip_set = self.skip_dyn_set_var.get()
+        no_pace = self.session.speaker_no_pace
+        skip_set = self.session.speaker_skip_dyn_set
 
         def work():
             c = self.session.require_client()
@@ -122,8 +84,8 @@ class SpeakerTab(ttk.Frame):
                 dyn_rate_hz=dyn_rate,
                 dyn_bits=16,
                 dyn_gain_db=dyn_gain,
-                dyn_mute=self.dyn_mute_var.get(),
-                dyn_clip=self.dyn_clip_var.get(),
+                dyn_mute=self.session.speaker_dyn_mute,
+                dyn_clip=self.session.speaker_dyn_clip,
                 send_dyn_set=not skip_set,
             )
 

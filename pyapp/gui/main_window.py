@@ -18,6 +18,7 @@ from gui.tabs import (
     TextingTab,
     VoiceTab,
 )
+from vkorobka_client import VkorobkaClient
 from voice_cli import STREAM_ID_MIC, parse_mic_stream_payload
 
 
@@ -55,21 +56,8 @@ class MicSignalPlotWindow:
         ttk.Label(ctrl, text="Точек отрисовки").grid(row=0, column=6, padx=4, pady=2, sticky=tk.W)
         self.max_points_var = tk.StringVar(value="3000")
         ttk.Entry(ctrl, textvariable=self.max_points_var, width=8).grid(row=0, column=7, padx=4, pady=2, sticky=tk.W)
-        self.thr_adaptive_var = tk.BooleanVar(value=True)
-        ttk.Checkbutton(ctrl, text="Порог: адаптивный", variable=self.thr_adaptive_var).grid(
-            row=1, column=0, columnspan=2, padx=4, pady=2, sticky=tk.W
-        )
-        ttk.Label(ctrl, text="Базовый порог").grid(row=1, column=2, padx=4, pady=2, sticky=tk.W)
-        self.thr_base_var = tk.StringVar(value="6000")
-        ttk.Entry(ctrl, textvariable=self.thr_base_var, width=10).grid(row=1, column=3, padx=4, pady=2, sticky=tk.W)
-        ttk.Label(ctrl, text="alpha").grid(row=1, column=4, padx=4, pady=2, sticky=tk.W)
-        self.thr_alpha_var = tk.StringVar(value="0.04")
-        ttk.Entry(ctrl, textvariable=self.thr_alpha_var, width=8).grid(row=1, column=5, padx=4, pady=2, sticky=tk.W)
-        ttk.Label(ctrl, text="множитель").grid(row=1, column=6, padx=4, pady=2, sticky=tk.W)
-        self.thr_mul_var = tk.StringVar(value="2.2")
-        ttk.Entry(ctrl, textvariable=self.thr_mul_var, width=8).grid(row=1, column=7, padx=4, pady=2, sticky=tk.W)
         ttk.Label(ctrl, text="(0 = авто/без ограничения где применимо)").grid(
-            row=2, column=0, columnspan=8, padx=4, pady=(0, 4), sticky=tk.W
+            row=1, column=0, columnspan=8, padx=4, pady=(0, 4), sticky=tk.W
         )
 
         info = ttk.Frame(self.top)
@@ -117,12 +105,12 @@ class MicSignalPlotWindow:
             return
 
     def _calc_threshold(self, level: float) -> float:
-        base_thr = float(self._safe_int(self.thr_base_var.get(), 6000, min_v=0, max_v=1_000_000_000))
-        if not self.thr_adaptive_var.get():
+        base_thr = float(max(0.0, self.session.smart_silence_threshold))
+        if not self.session.smart_silence_adaptive:
             self._noise_floor_ema = 0.0
             return base_thr
-        alpha = self._safe_float(self.thr_alpha_var.get(), 0.04, min_v=0.001, max_v=0.5)
-        mul = self._safe_float(self.thr_mul_var.get(), 2.2, min_v=1.0, max_v=100.0)
+        alpha = max(0.001, min(0.5, float(self.session.smart_silence_noise_alpha)))
+        mul = max(1.0, min(100.0, float(self.session.smart_silence_multiplier)))
         if self._noise_floor_ema <= 0.0:
             self._noise_floor_ema = level
         else:
@@ -283,8 +271,119 @@ def main() -> None:
     session = AppSession(log)
     session.set_status_callback(lambda msg: root.after(0, lambda: status_var.set(msg)))
 
-    nb = ttk.Notebook(root)
-    nb.pack(fill=tk.BOTH, expand=True, padx=4, pady=4)
+    def _safe_int(raw: str, default: int) -> int:
+        try:
+            return int(raw.strip())
+        except Exception:
+            return default
+
+    def _safe_float(raw: str, default: float) -> float:
+        try:
+            return float(raw.strip())
+        except Exception:
+            return default
+
+    content = ttk.Frame(root)
+    content.pack(fill=tk.BOTH, expand=True, padx=4, pady=4)
+    left = ttk.LabelFrame(content, text="Общие настройки (микрофон / динамик)")
+    left.pack(side=tk.LEFT, fill=tk.Y, padx=(0, 4))
+    right = ttk.Frame(content)
+    right.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
+
+    lrow = 0
+    ttk.Label(left, text="Микрофон").grid(row=lrow, column=0, columnspan=4, sticky=tk.W, padx=4, pady=(4, 2))
+    lrow += 1
+    mic_rate_var = tk.StringVar(value=str(session.mic_rate_hz))
+    mic_bits_var = tk.StringVar(value=str(session.mic_bits))
+    mic_gain_var = tk.StringVar(value=str(session.mic_gain_db))
+    mic_chunk_var = tk.StringVar(value=str(session.mic_chunk_samples))
+    mic_record_gain_var = tk.StringVar(value=str(session.mic_record_gain_db))
+    mic_mute_var = tk.BooleanVar(value=session.mic_mute)
+    mic_clip_var = tk.BooleanVar(value=session.mic_clip)
+    ttk.Label(left, text="rate_hz").grid(row=lrow, column=0, sticky=tk.W, padx=4, pady=2)
+    ttk.Entry(left, textvariable=mic_rate_var, width=8).grid(row=lrow, column=1, sticky=tk.W, padx=4, pady=2)
+    ttk.Label(left, text="bits").grid(row=lrow, column=2, sticky=tk.W, padx=4, pady=2)
+    ttk.Combobox(left, textvariable=mic_bits_var, values=("16", "24"), width=6, state="readonly").grid(
+        row=lrow, column=3, sticky=tk.W, padx=4, pady=2
+    )
+    lrow += 1
+    ttk.Label(left, text="gain_db").grid(row=lrow, column=0, sticky=tk.W, padx=4, pady=2)
+    ttk.Entry(left, textvariable=mic_gain_var, width=8).grid(row=lrow, column=1, sticky=tk.W, padx=4, pady=2)
+    ttk.Label(left, text="chunk").grid(row=lrow, column=2, sticky=tk.W, padx=4, pady=2)
+    ttk.Entry(left, textvariable=mic_chunk_var, width=8).grid(row=lrow, column=3, sticky=tk.W, padx=4, pady=2)
+    lrow += 1
+    ttk.Label(left, text="record_gain_db").grid(row=lrow, column=0, sticky=tk.W, padx=4, pady=2)
+    ttk.Entry(left, textvariable=mic_record_gain_var, width=8).grid(row=lrow, column=1, sticky=tk.W, padx=4, pady=2)
+    ttk.Checkbutton(left, text="mute", variable=mic_mute_var).grid(row=lrow, column=2, sticky=tk.W, padx=4, pady=2)
+    ttk.Checkbutton(left, text="clip", variable=mic_clip_var).grid(row=lrow, column=3, sticky=tk.W, padx=4, pady=2)
+    lrow += 1
+
+    ttk.Separator(left, orient=tk.HORIZONTAL).grid(row=lrow, column=0, columnspan=4, sticky=tk.EW, padx=4, pady=4)
+    lrow += 1
+    ttk.Label(left, text="Динамик").grid(row=lrow, column=0, columnspan=4, sticky=tk.W, padx=4, pady=(2, 2))
+    lrow += 1
+    sp_chunk_var = tk.StringVar(value=str(session.speaker_chunk_samples))
+    sp_pace_var = tk.StringVar(value=str(session.speaker_pace_factor))
+    sp_timeout_var = tk.StringVar(value=str(session.speaker_command_timeout_s))
+    sp_rate_var = tk.StringVar(value=str(session.speaker_dyn_rate_hz))
+    sp_gain_var = tk.StringVar(value=str(session.speaker_dyn_gain_db))
+    sp_no_pace_var = tk.BooleanVar(value=session.speaker_no_pace)
+    sp_skip_dyn_set_var = tk.BooleanVar(value=session.speaker_skip_dyn_set)
+    sp_dyn_mute_var = tk.BooleanVar(value=session.speaker_dyn_mute)
+    sp_dyn_clip_var = tk.BooleanVar(value=session.speaker_dyn_clip)
+    ttk.Label(left, text="chunk").grid(row=lrow, column=0, sticky=tk.W, padx=4, pady=2)
+    ttk.Entry(left, textvariable=sp_chunk_var, width=8).grid(row=lrow, column=1, sticky=tk.W, padx=4, pady=2)
+    ttk.Label(left, text="pace_factor").grid(row=lrow, column=2, sticky=tk.W, padx=4, pady=2)
+    ttk.Entry(left, textvariable=sp_pace_var, width=8).grid(row=lrow, column=3, sticky=tk.W, padx=4, pady=2)
+    lrow += 1
+    ttk.Label(left, text="timeout_s").grid(row=lrow, column=0, sticky=tk.W, padx=4, pady=2)
+    ttk.Entry(left, textvariable=sp_timeout_var, width=8).grid(row=lrow, column=1, sticky=tk.W, padx=4, pady=2)
+    ttk.Label(left, text="dyn_rate").grid(row=lrow, column=2, sticky=tk.W, padx=4, pady=2)
+    ttk.Combobox(
+        left,
+        textvariable=sp_rate_var,
+        values=[str(x) for x in sorted(VkorobkaClient.DYN_ALLOWED_SAMPLE_RATES_HZ)],
+        width=8,
+        state="readonly",
+    ).grid(row=lrow, column=3, sticky=tk.W, padx=4, pady=2)
+    lrow += 1
+    ttk.Label(left, text="dyn_gain_db").grid(row=lrow, column=0, sticky=tk.W, padx=4, pady=2)
+    ttk.Entry(left, textvariable=sp_gain_var, width=8).grid(row=lrow, column=1, sticky=tk.W, padx=4, pady=2)
+    ttk.Checkbutton(left, text="no_pace", variable=sp_no_pace_var).grid(row=lrow, column=2, sticky=tk.W, padx=4, pady=2)
+    ttk.Checkbutton(left, text="skip_dyn_set", variable=sp_skip_dyn_set_var).grid(row=lrow, column=3, sticky=tk.W, padx=4, pady=2)
+    lrow += 1
+    ttk.Checkbutton(left, text="dyn_mute", variable=sp_dyn_mute_var).grid(row=lrow, column=2, sticky=tk.W, padx=4, pady=2)
+    ttk.Checkbutton(left, text="dyn_clip", variable=sp_dyn_clip_var).grid(row=lrow, column=3, sticky=tk.W, padx=4, pady=2)
+
+    def _sync_shared_settings(*_args) -> None:
+        session.mic_rate_hz = max(8000, min(96000, _safe_int(mic_rate_var.get(), session.mic_rate_hz)))
+        bits = _safe_int(mic_bits_var.get(), session.mic_bits)
+        session.mic_bits = 24 if bits == 24 else 16
+        session.mic_gain_db = _safe_float(mic_gain_var.get(), session.mic_gain_db)
+        session.mic_chunk_samples = max(64, min(512, _safe_int(mic_chunk_var.get(), session.mic_chunk_samples)))
+        session.mic_record_gain_db = _safe_float(mic_record_gain_var.get(), session.mic_record_gain_db)
+        session.mic_mute = bool(mic_mute_var.get())
+        session.mic_clip = bool(mic_clip_var.get())
+        session.speaker_chunk_samples = max(1, min(512, _safe_int(sp_chunk_var.get(), session.speaker_chunk_samples)))
+        session.speaker_pace_factor = _safe_float(sp_pace_var.get(), session.speaker_pace_factor)
+        session.speaker_command_timeout_s = max(0.5, _safe_float(sp_timeout_var.get(), session.speaker_command_timeout_s))
+        rate = _safe_int(sp_rate_var.get(), session.speaker_dyn_rate_hz)
+        if rate in VkorobkaClient.DYN_ALLOWED_SAMPLE_RATES_HZ:
+            session.speaker_dyn_rate_hz = rate
+        session.speaker_dyn_gain_db = _safe_float(sp_gain_var.get(), session.speaker_dyn_gain_db)
+        session.speaker_no_pace = bool(sp_no_pace_var.get())
+        session.speaker_skip_dyn_set = bool(sp_skip_dyn_set_var.get())
+        session.speaker_dyn_mute = bool(sp_dyn_mute_var.get())
+        session.speaker_dyn_clip = bool(sp_dyn_clip_var.get())
+
+    for v in (mic_rate_var, mic_bits_var, mic_gain_var, mic_chunk_var, mic_record_gain_var, sp_chunk_var, sp_pace_var, sp_timeout_var, sp_rate_var, sp_gain_var):
+        v.trace_add("write", _sync_shared_settings)
+    for v in (mic_mute_var, mic_clip_var, sp_no_pace_var, sp_skip_dyn_set_var, sp_dyn_mute_var, sp_dyn_clip_var):
+        v.trace_add("write", _sync_shared_settings)
+    _sync_shared_settings()
+
+    nb = ttk.Notebook(right)
+    nb.pack(fill=tk.BOTH, expand=True)
 
     nb.add(ConnectionTab(nb, session, root), text="Сеть")
     nb.add(DisplayTab(nb, session, root), text="Дисплей")

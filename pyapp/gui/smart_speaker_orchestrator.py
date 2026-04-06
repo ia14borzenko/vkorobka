@@ -50,6 +50,19 @@ class VoiceConfig:
     silence_multiplier: float = 2.2
 
 
+@dataclass
+class SpeakerConfig:
+    chunk_samples: int = 512
+    pace: bool = True
+    pace_factor: float = 0.97
+    command_timeout_s: float = 4.0
+    dyn_rate_hz: int = 16000
+    dyn_gain_db: float = 0.0
+    dyn_mute: bool = False
+    dyn_clip: bool = True
+    send_dyn_set: bool = True
+
+
 class SmartSpeakerOrchestrator:
     STATE_IDLE = "idleWaitWake"
     STATE_CAPTURE = "captureQuery"
@@ -67,6 +80,7 @@ class SmartSpeakerOrchestrator:
         backend_adapter: BackendAdapterBase,
         texting_cfg_getter: Callable[[], TextingConfig],
         voice_cfg_getter: Callable[[], VoiceConfig],
+        speaker_cfg_getter: Optional[Callable[[], SpeakerConfig]] = None,
         state_changed: Callable[[str], None],
     ) -> None:
         self.root = root
@@ -76,6 +90,7 @@ class SmartSpeakerOrchestrator:
         self.backend = backend_adapter
         self.texting_cfg_getter = texting_cfg_getter
         self.voice_cfg_getter = voice_cfg_getter
+        self.speaker_cfg_getter = speaker_cfg_getter
         self.state_changed = state_changed
 
         self._lock = threading.RLock()
@@ -355,7 +370,20 @@ class SmartSpeakerOrchestrator:
         manager.add_text(text)
 
         client = self.client_getter()
-        ok = client.play_audio_file_to_esp32_dyn(str(path))
+        sp = self.speaker_cfg_getter() if self.speaker_cfg_getter else SpeakerConfig()
+        ok = client.play_audio_file_to_esp32_dyn(
+            str(path),
+            chunk_samples=sp.chunk_samples,
+            pace=sp.pace,
+            pace_factor=sp.pace_factor,
+            command_timeout=sp.command_timeout_s,
+            dyn_rate_hz=sp.dyn_rate_hz,
+            dyn_bits=16,
+            dyn_gain_db=sp.dyn_gain_db,
+            dyn_mute=sp.dyn_mute,
+            dyn_clip=sp.dyn_clip,
+            send_dyn_set=sp.send_dyn_set,
+        )
         if not ok:
             self.log("[smart] Предупреждение: audio playback завершился с ошибкой")
 
@@ -367,7 +395,20 @@ class SmartSpeakerOrchestrator:
             self.log(f"[smart] Аудио не найдено: {path}")
             return
         client = self.client_getter()
-        ok = client.play_audio_file_to_esp32_dyn(str(path))
+        sp = self.speaker_cfg_getter() if self.speaker_cfg_getter else SpeakerConfig()
+        ok = client.play_audio_file_to_esp32_dyn(
+            str(path),
+            chunk_samples=sp.chunk_samples,
+            pace=sp.pace,
+            pace_factor=sp.pace_factor,
+            command_timeout=sp.command_timeout_s,
+            dyn_rate_hz=sp.dyn_rate_hz,
+            dyn_bits=16,
+            dyn_gain_db=sp.dyn_gain_db,
+            dyn_mute=sp.dyn_mute,
+            dyn_clip=sp.dyn_clip,
+            send_dyn_set=sp.send_dyn_set,
+        )
         if not ok:
             self.log("[smart] Предупреждение: audio playback завершился с ошибкой")
 
