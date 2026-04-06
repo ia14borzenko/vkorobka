@@ -36,6 +36,10 @@ class VkorobkaClient:
         self.verbose_udp = verbose_udp
         # Обработчики MSG_TYPE_STREAM с ESP32 (stream_id -> callback)
         self._stream_handlers: Dict[int, Callable[[Dict[str, Any]], None]] = {}
+        # Пассивные подписчики на STREAM (не заменяют основной handler)
+        self._stream_tap_handlers: Dict[int, Dict[int, Callable[[Dict[str, Any]], None]]] = {}
+        self._stream_tap_lock = threading.Lock()
+        self._next_tap_token = 1
         
         # Создаем UDP сокет
         self.sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
@@ -66,6 +70,32 @@ class VkorobkaClient:
     ) -> None:
         """Вызывать для потоковых сообщений type=stream, source=esp32 (например PCM с микрофона)."""
         self._stream_handlers[stream_id] = handler
+
+    def add_stream_tap_handler(
+        self, stream_id: int, handler: Callable[[Dict[str, Any]], None]
+    ) -> int:
+        """
+        Добавляет пассивный обработчик STREAM по stream_id.
+        Возвращает token для последующего удаления.
+        """
+        with self._stream_tap_lock:
+            token = self._next_tap_token
+            self._next_tap_token += 1
+            if stream_id not in self._stream_tap_handlers:
+                self._stream_tap_handlers[stream_id] = {}
+            self._stream_tap_handlers[stream_id][token] = handler
+            return token
+
+    def remove_stream_tap_handler(self, token: int) -> None:
+        """Удаляет пассивный обработчик STREAM по token."""
+        with self._stream_tap_lock:
+            for sid in list(self._stream_tap_handlers.keys()):
+                taps = self._stream_tap_handlers[sid]
+                if token in taps:
+                    del taps[token]
+                    if not taps:
+                        del self._stream_tap_handlers[sid]
+                    return
     
     def _receive_loop(self):
         """Цикл приема сообщений в отдельном потоке"""
@@ -126,8 +156,17 @@ class VkorobkaClient:
         """
         if message.get('type') == 'stream' and message.get('source') == 'esp32':
             sid = int(message.get('stream_id', 0))
+            with self._stream_tap_lock:
+                tap_handlers = list(self._stream_tap_handlers.get(sid, {}).values())
+            for tap in tap_handlers:
+                try:
+                    tap(message)
+                except Exception as e:
+                    print(f"[client] [STREAM_TAP] Ошибка обработчика sid={sid}: {e}", file=sys.stderr)
             if sid in self._stream_handlers:
                 self._stream_handlers[sid](message)
+                return
+            if tap_handlers:
                 return
 
         # Проверяем, является ли это подтверждением чанка (CHUNK_ACK)
