@@ -60,6 +60,22 @@ static int parse_json_int(const char* field_name, const char* json_buf, int defa
     return result;
 }
 
+static bool parse_json_bool(const char* field_name, const char* json_buf, bool default_val) {
+    char search_str[64];
+    snprintf(search_str, sizeof(search_str), "\"%s\"", field_name);
+    const char* field = strstr(json_buf, search_str);
+    if (!field) return default_val;
+    const char* colon = strchr(field, ':');
+    if (!colon) return default_val;
+    const char* val = colon + 1;
+    while (*val == ' ' || *val == '\t') val++;
+    if (strncmp(val, "true", 4) == 0) return true;
+    if (strncmp(val, "false", 5) == 0) return false;
+    int n = 0;
+    if (sscanf(val, "%d", &n) == 1) return n != 0;
+    return default_val;
+}
+
 // Проверка пробельного символа (минимально необходимый набор)
 static bool is_space(u32 unicode) {
     return (unicode == ' '  ||  // обычный пробел
@@ -344,6 +360,7 @@ void texting_handle_add(const char* json_buf, u32 json_len) {
     int field_x = 52, field_y = 160, field_width = 380, field_height = 120;
     int char_height = 14, line_spacing = 2, typing_speed_ms = 50;
     int cursor_x = 0, cursor_y = 0, current_line_index = 0;
+    bool clear_before_add = false;
     
     // Парсим параметры поля (учитываем пробелы в JSON)
     field_x = parse_json_int("field_x", json_buf, field_x);
@@ -356,6 +373,7 @@ void texting_handle_add(const char* json_buf, u32 json_len) {
     cursor_x = parse_json_int("cursor_x", json_buf, cursor_x);
     cursor_y = parse_json_int("cursor_y", json_buf, cursor_y);
     current_line_index = parse_json_int("current_line_index", json_buf, current_line_index);
+    clear_before_add = parse_json_bool("clear_before_add", json_buf, false);
     
     // Парсим текст (учитываем пробелы в JSON: "text": "Hello" или "text":"Hello")
     const char* text_field = strstr(json_buf, "\"text\"");
@@ -408,6 +426,14 @@ void texting_handle_add(const char* json_buf, u32 json_len) {
     ESP_LOGI(TAG, "TEXT_ADD: text='%s' (len=%zu)", text, text_len);
     ESP_LOGI(TAG, "TEXT_ADD: field=(%d,%d) %dx%d, char_h=%d, spacing=%d, speed=%dms",
              field_x, field_y, field_width, field_height, char_height, line_spacing, typing_speed_ms);
+    ESP_LOGI(TAG, "TEXT_ADD: clear_before_add=%s", clear_before_add ? "true" : "false");
+
+    if (clear_before_add && s_lcd) {
+        s_lcd->fillRect(field_x, field_y, field_width, field_height, 0xFFFF);
+        cursor_x = 0;
+        cursor_y = 0;
+        current_line_index = 0;
+    }
     
     // Очищаем предыдущее состояние
     if (s_texting_state.active && s_texting_state.text) {

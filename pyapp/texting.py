@@ -35,6 +35,7 @@ class TextingManager:
         client: Optional[VkorobkaClient] = None,
         destination: str = "esp32",
         command_timeout_s: float = 4.0,
+        clear_before_add_default: bool = False,
     ):
         """
         Инициализация менеджера текстинга.
@@ -71,6 +72,7 @@ class TextingManager:
         self.client = client
         self.destination = destination
         self.command_timeout_s = float(command_timeout_s)
+        self.clear_before_add_default = bool(clear_before_add_default)
         
         # Состояние курсора
         self.cursor_x = 0  # Относительно начала поля
@@ -108,7 +110,7 @@ class TextingManager:
         else:
             print("[texting] Клиент не установлен, команда очистки не отправлена")
     
-    def add_text(self, text: str) -> None:
+    def add_text(self, text: str, *, clear_before_add: Optional[bool] = None) -> None:
         """
         Добавление текста. Текст отправляется целиком на ESP32, которая сама имитирует текстинг.
         
@@ -125,8 +127,9 @@ class TextingManager:
             print(f"  Строка {i+1}: '{line}'")
         
         # Отправляем весь текст сразу на ESP32
+        clear_flag = self.clear_before_add_default if clear_before_add is None else bool(clear_before_add)
         if self.client:
-            self._send_text_command(text, lines)
+            self._send_text_command(text, lines, clear_before_add=clear_flag)
             self._advance_cursor_state(text)
         else:
             print("[texting] Клиент не установлен, команда не отправлена")
@@ -245,7 +248,7 @@ class TextingManager:
         
         print(f"[texting] Отправлена команда TEXT_CLEAR (test_id={test_id})")
     
-    def _send_text_command(self, text: str, lines: List[str]) -> None:
+    def _send_text_command(self, text: str, lines: List[str], *, clear_before_add: bool = False) -> None:
         """
         Отправляет команду добавления текста на ESP32 вместе с изображениями символов.
         
@@ -299,6 +302,7 @@ class TextingManager:
         # Формируем payload команды
         payload_data = {
             "text": text,
+            "clear_before_add": bool(clear_before_add),
             "field_x": self.field_x,
             "field_y": self.field_y,
             "field_width": self.field_width,

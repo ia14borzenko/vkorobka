@@ -148,6 +148,7 @@ class SmartSpeakerOrchestrator:
         with self._lock:
             if not self._running or self._state != self.STATE_IDLE:
                 return
+        self._show_listening_query_text()
         self.log("[smart] Wake-up обнаружен, начинаю запись запроса")
         self._start_capture()
 
@@ -345,6 +346,15 @@ class SmartSpeakerOrchestrator:
         except Exception as e:
             self.log(f"[smart] Не удалось вывести текст ожидания: {e}")
 
+    def _show_listening_query_text(self) -> None:
+        try:
+            cfg = self.texting_cfg_getter()
+            manager = self._build_texting_manager(cfg, typing_speed_ms=35)
+            manager.add_text("слушаю запрос ...")
+            self.log("[smart] На дисплей выведено: слушаю запрос ...")
+        except Exception as e:
+            self.log(f"[smart] Не удалось вывести текст прослушивания: {e}")
+
     def _play_audio_with_single_text_add(self, payload: ResponsePayload) -> None:
         path = Path(payload.audio_path) if payload.audio_path else None
         if not path or not path.is_file():
@@ -439,6 +449,7 @@ class SmartSpeakerOrchestrator:
             client=self.client_getter(),
             destination=self.destination_getter(),
             command_timeout_s=4.0,
+            clear_before_add_default=True,
         )
 
     def _resolve_typing_speed_ms(
