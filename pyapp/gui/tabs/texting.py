@@ -138,6 +138,7 @@ class TextingTab(ttk.Frame):
                 char_map_json=str(char_map_json),
                 client=self.session.require_client(),
                 destination=self.session.destination,
+                command_timeout_s=min(4.0, self.session.timeout),
             )
         except Exception as e:
             messagebox.showerror("Текстинг", str(e))

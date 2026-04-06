@@ -51,7 +51,7 @@ def main() -> int:
     parser.add_argument(
         "--command-timeout",
         type=float,
-        default=15.0,
+        default=4.0,
         help="Таймаут ожидания DYN_ON_OK / DYN_OFF_OK",
     )
     parser.add_argument(

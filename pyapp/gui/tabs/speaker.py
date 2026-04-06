@@ -38,7 +38,7 @@ class SpeakerTab(ttk.Frame):
             row=rr, column=0, columnspan=2, sticky=tk.W, padx=4, pady=2
         )
         ttk.Label(f, text="command_timeout (с)").grid(row=rr, column=2, sticky=tk.W, padx=4, pady=2)
-        self.cmd_to_var = tk.StringVar(value="15.0")
+        self.cmd_to_var = tk.StringVar(value="4.0")
         ttk.Entry(f, textvariable=self.cmd_to_var, width=8).grid(row=rr, column=3, sticky=tk.W, padx=4, pady=2)
         rr += 1
 

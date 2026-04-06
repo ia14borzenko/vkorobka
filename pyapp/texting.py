@@ -33,7 +33,8 @@ class TextingManager:
         chars_dir: str = "fonts/chars",
         char_map_json: str = "fonts/char_map.json",
         client: Optional[VkorobkaClient] = None,
-        destination: str = "esp32"
+        destination: str = "esp32",
+        command_timeout_s: float = 4.0,
     ):
         """
         Инициализация менеджера текстинга.
@@ -69,6 +70,7 @@ class TextingManager:
         # Клиент для отправки команд
         self.client = client
         self.destination = destination
+        self.command_timeout_s = float(command_timeout_s)
         
         # Состояние курсора
         self.cursor_x = 0  # Относительно начала поля
@@ -236,6 +238,9 @@ class TextingManager:
             command="TEXT_CLEAR",
             payload_data=payload_data
         )
+        resp = self.client.wait_for_response(test_id, timeout=self.command_timeout_s)
+        if resp is None:
+            print("[texting] Предупреждение: timeout ожидания TEXT_CLEAR")
         
         print(f"[texting] Отправлена команда TEXT_CLEAR (test_id={test_id})")
     
@@ -312,5 +317,8 @@ class TextingManager:
             command="TEXT_ADD",
             payload_data=payload_data
         )
+        resp = self.client.wait_for_response(test_id, timeout=self.command_timeout_s)
+        if resp is None:
+            print("[texting] Предупреждение: timeout ожидания TEXT_ADD")
         
         print(f"[texting] Отправлена команда TEXT_ADD (test_id={test_id}), текст: '{text[:50]}...' (если длинный), символов: {len(chars_data)}")

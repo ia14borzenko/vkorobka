@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Callable, Optional
+from typing import Any, Callable, Optional
 
 
 @dataclass
@@ -44,6 +44,12 @@ class BackendAdapterBase:
     def submit_query_audio(self, query_wav: Path) -> None:
         """Передать записанный запрос на обработку в back-end."""
 
+    def submit_wake_audio_chunk(self, sample_rate_hz: int, bits: int, samples: Any) -> None:
+        """
+        Передать фрагмент непрерывного аудиопотока wake-listening в back-end.
+        Здесь не выполняется детекция wake-фразы — только транспорт аудио.
+        """
+
 
 class MockBackendAdapter(BackendAdapterBase):
     """
@@ -55,6 +61,7 @@ class MockBackendAdapter(BackendAdapterBase):
     def __init__(self) -> None:
         self._events: Optional[BackendEvents] = None
         self._running = False
+        self._wake_chunks_count = 0
 
     def start(self) -> None:
         self._running = True
@@ -65,6 +72,13 @@ class MockBackendAdapter(BackendAdapterBase):
     def submit_query_audio(self, query_wav: Path) -> None:
         # В мок-режиме обработчик приходит по команде пользователя.
         _ = query_wav
+
+    def submit_wake_audio_chunk(self, sample_rate_hz: int, bits: int, samples: Any) -> None:
+        # В мок-режиме только считаем входящие чанки.
+        _ = sample_rate_hz
+        _ = bits
+        _ = samples
+        self._wake_chunks_count += 1
 
     def simulate_wake_detected(self) -> None:
         if self._running and self._events:

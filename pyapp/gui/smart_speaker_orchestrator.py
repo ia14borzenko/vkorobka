@@ -83,6 +83,8 @@ class SmartSpeakerOrchestrator:
         self._bits = 24
         self._last_above_threshold_ts = 0.0
         self._stop_capture_requested = False
+        self._voice_stream_started = False
+        self._render_in_progress = False
 
     def start(self) -> None:
         with self._lock:
@@ -102,6 +104,7 @@ class SmartSpeakerOrchestrator:
             )
         )
         self.backend.start()
+        self._start_wake_listening_stream()
         self.log("[smart] Сценарий запущен, ожидание wake-up фразы")
 
     def stop(self) -> None:
@@ -140,24 +143,29 @@ class SmartSpeakerOrchestrator:
         with self._lock:
             if not self._running:
                 return
-            if self._state not in (self.STATE_WAIT_BACKEND, self.STATE_CAPTURE):
+            if self._render_in_progress:
+                self.log("[smart] response_ready игнор: рендер уже выполняется")
+                return
+            if self._state != self.STATE_WAIT_BACKEND:
                 self.log(f"[smart] response_ready в состоянии {self._state}, игнор")
                 return
+            self._render_in_progress = True
             self._set_state(self.STATE_RENDER)
+        self._pause_wake_stream_for_render()
         self.log("[smart] Получен ответ backend, запускаю вывод")
         threading.Thread(target=self._render_response, args=(payload,), daemon=True).start()
 
     def _start_capture(self) -> None:
-        vc = self.voice_cfg_getter()
-        client = self.client_getter()
         with self._lock:
             self._chunks.clear()
-            self._sample_rate = vc.rate_hz
-            self._bits = vc.bits
             self._last_above_threshold_ts = time.time()
             self._stop_capture_requested = False
         self._set_state(self.STATE_CAPTURE)
+        self.log("[smart] Запись запроса началась")
 
+    def _start_wake_listening_stream(self) -> None:
+        vc = self.voice_cfg_getter()
+        client = self.client_getter()
         client.register_stream_handler(STREAM_ID_MIC, self._mic_handler)
         if not client.send_voice_set(
             rate_hz=vc.rate_hz,
@@ -166,37 +174,37 @@ class SmartSpeakerOrchestrator:
             chunk_samples=vc.chunk_samples,
             mute=vc.mute,
             clip=vc.clip,
-            command_timeout=10.0,
+            command_timeout=4.0,
         ):
-            self.log("[smart] voice.set отклонен")
-            self._safe_voice_off()
-            self._set_state(self.STATE_IDLE)
-            return
+            raise RuntimeError("voice.set отклонён при запуске wake-listening")
         tid = client.send_command(self.destination_getter(), "voice.on")
-        resp = client.wait_for_response(tid, timeout=10.0)
+        resp = client.wait_for_response(tid, timeout=4.0)
         if not resp:
-            self.log("[smart] нет ответа на voice.on")
-            self._safe_voice_off()
-            self._set_state(self.STATE_IDLE)
-            return
-        self.log("[smart] Запись запроса началась")
+            raise RuntimeError("Нет ответа на voice.on при запуске wake-listening")
+        self._voice_stream_started = True
+        self.log("[smart] Непрерывный поток микрофона в backend запущен")
 
     def _mic_handler(self, message: Dict[str, Any]) -> None:
-        with self._lock:
-            if self._state != self.STATE_CAPTURE:
-                return
         payload = message.get("payload") or ""
         if not payload:
             return
         try:
             rate, block, bits = parse_mic_stream_payload(payload)
             arr = np.asarray(block, dtype=np.int32 if bits == 24 else np.int16)
+            with self._lock:
+                state_now = self._state
+            if state_now == self.STATE_IDLE:
+                # Непрерывная передача wake-listening аудио в backend.
+                self.backend.submit_wake_audio_chunk(rate, bits, arr.copy())
+            with self._lock:
+                self._sample_rate = rate
+                self._bits = bits
+                if self._state != self.STATE_CAPTURE:
+                    return
             level = float(np.mean(np.abs(arr))) if arr.size else 0.0
             now = time.time()
             vc = self.voice_cfg_getter()
             with self._lock:
-                self._sample_rate = rate
-                self._bits = bits
                 self._chunks.append((arr, bits))
                 if vc.stop_mode == "silence":
                     if level >= vc.silence_threshold:
@@ -218,8 +226,6 @@ class SmartSpeakerOrchestrator:
         with self._lock:
             if self._state != self.STATE_CAPTURE:
                 return
-        client = self.client_getter()
-        self._safe_voice_off()
         with self._lock:
             sr = self._sample_rate
             bits = self._bits
@@ -231,6 +237,7 @@ class SmartSpeakerOrchestrator:
 
         query_wav = self._persist_query_audio(merged, sr, bits)
         self._set_state(self.STATE_WAIT_BACKEND)
+        self._show_waiting_backend_text()
         self.log(f"[smart] Запрос записан: {query_wav}")
         self.backend.submit_query_audio(query_wav)
 
@@ -254,22 +261,27 @@ class SmartSpeakerOrchestrator:
     def _safe_voice_off(self) -> None:
         try:
             client = self.client_getter()
-            tid = client.send_command(self.destination_getter(), "voice.off")
-            client.wait_for_response(tid, timeout=5.0)
+            if self._voice_stream_started:
+                tid = client.send_command(self.destination_getter(), "voice.off")
+                client.wait_for_response(tid, timeout=4.0)
             client.register_stream_handler(STREAM_ID_MIC, lambda _m: None)
+            self._voice_stream_started = False
         except Exception:
             pass
+
+    def _pause_wake_stream_for_render(self) -> None:
+        # На некоторых прошивках dyn.* конфликтует с активным voice.on.
+        self._safe_voice_off()
+        self.log("[smart] Wake-stream временно приостановлен на время вывода ответа")
 
     def _render_response(self, payload: ResponsePayload) -> None:
         err: Optional[Exception] = None
         try:
-            self._send_display_asset(payload)
-            t1 = threading.Thread(target=self._play_audio_if_present, args=(payload,), daemon=True)
-            t2 = threading.Thread(target=self._send_text_if_present, args=(payload,), daemon=True)
-            t1.start()
-            t2.start()
-            t1.join()
-            t2.join()
+            # По новому UX не рисуем картинки в режиме ожидания/ответа.
+            # Критично: команды dyn.* и TEXT_* не должны уходить параллельно на текущее устройство.
+            # Выполняем последовательно, иначе получаем рассинхрон test_id/ACK на стороне шлюза.
+            self._play_audio_if_present(payload)
+            self._send_text_if_present(payload)
             self.log("[smart] Вывод ответа завершен")
         except Exception as e:
             err = e
@@ -277,29 +289,26 @@ class SmartSpeakerOrchestrator:
         finally:
             if err is not None:
                 self.log("[smart] Возврат в idle после ошибки")
-            self._set_state(self.STATE_IDLE)
+            with self._lock:
+                still_running = self._running
+            if still_running:
+                try:
+                    self._start_wake_listening_stream()
+                except Exception as e:
+                    self.log(f"[smart] Ошибка перезапуска wake-stream: {e}")
+                self._set_state(self.STATE_IDLE)
+            with self._lock:
+                self._render_in_progress = False
 
-    def _send_display_asset(self, payload: ResponsePayload) -> None:
-        if not payload.display_asset:
-            return
-        from image_utils import image_to_rgb565_be, load_bg_image
-
-        asset = Path(payload.display_asset)
-        client = self.client_getter()
-        dest = self.destination_getter()
-        if payload.is_animation and asset.is_dir():
-            frames = sorted(asset.glob("*.png")) + sorted(asset.glob("*.jpg")) + sorted(asset.glob("*.jpeg"))
-            for frame in frames:
-                img = load_bg_image(str(frame))
-                w, h = img.size
-                frame_bytes = image_to_rgb565_be(img)
-                client.send_lcd_frame_rgb565(dest, frame_bytes, w, h, chunk_rows=20)
-            return
-        if asset.is_file():
-            img = load_bg_image(str(asset))
-            w, h = img.size
-            frame_bytes = image_to_rgb565_be(img)
-            client.send_lcd_frame_rgb565(dest, frame_bytes, w, h, chunk_rows=20)
+    def _show_waiting_backend_text(self) -> None:
+        try:
+            cfg = self.texting_cfg_getter()
+            manager = self._build_texting_manager(cfg, typing_speed_ms=35)
+            manager.clear_field()
+            manager.add_text("ожидаем ответа ...")
+            self.log("[smart] На дисплей выведено: ожидаем ответа ...")
+        except Exception as e:
+            self.log(f"[smart] Не удалось вывести текст ожидания: {e}")
 
     def _play_audio_if_present(self, payload: ResponsePayload) -> None:
         if not payload.audio_path:
@@ -339,6 +348,7 @@ class SmartSpeakerOrchestrator:
             char_map_json=str(fonts_dir / "char_map.json"),
             client=self.client_getter(),
             destination=self.destination_getter(),
+            command_timeout_s=4.0,
         )
 
     def _resolve_typing_speed_ms(

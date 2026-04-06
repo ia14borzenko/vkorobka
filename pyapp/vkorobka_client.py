@@ -417,9 +417,23 @@ class VkorobkaClient:
         if not resp:
             print("[client] Нет ответа на dyn.set", file=sys.stderr)
             return False
-        ok = "DYN_SET_OK" in self._ack_payload_text(resp)
+        ack = self._ack_payload_text(resp)
+        ok = "DYN_SET_OK" in ack
         if not ok:
-            print("[client] dyn.set отклонён:", self._ack_payload_text(resp), file=sys.stderr)
+            print("[client] dyn.set отклонён:", ack, file=sys.stderr)
+            # Частый кейс после сбоев: на устройстве уже активен dyn.on.
+            # Пробуем мягко погасить dyn и повторить dyn.set один раз.
+            if "DYN_SET_ERR" in ack:
+                try:
+                    tid_off = self.send_command("esp32", "dyn.off")
+                    self.wait_for_response(tid_off, timeout=command_timeout)
+                    tid2 = self.send_command("esp32", cmd)
+                    resp2 = self.wait_for_response(tid2, timeout=command_timeout)
+                    if resp2 and "DYN_SET_OK" in self._ack_payload_text(resp2):
+                        print("[client] dyn.set восстановлен после dyn.off", file=sys.stderr)
+                        return True
+                except Exception:
+                    pass
         return ok
 
     def _send_stream_chunk(
@@ -615,7 +629,7 @@ class VkorobkaClient:
         chunk_samples: int = 512,
         pace: bool = True,
         pace_factor: float = 0.97,
-        command_timeout: float = 15.0,
+        command_timeout: float = 4.0,
         dyn_rate_hz: Optional[int] = None,
         dyn_bits: int = 16,
         dyn_gain_db: float = 0.0,
