@@ -720,12 +720,12 @@ class VkorobkaClient:
             return False
 
         seq = 0
-        chunk_send_total_s = 0.0
+        chunk_cycle_total_s = 0.0
+        prev_cycle_ts = time.perf_counter()
         for start in range(0, n_total, chunk_samples):
             block = samples_i16[start : start + chunk_samples]
             payload = self.pack_pcm16_stream_payload_mono_dyn(block, sample_rate_hz=target_sr)
             chunk_b64 = image_to_base64(payload)
-            t0 = time.perf_counter()
             self._send_stream_chunk(
                 destination="esp32",
                 stream_id=self.STREAM_ID_DYN_PCM,
@@ -735,17 +735,19 @@ class VkorobkaClient:
                 extra_fields=None,
                 verbose=False,
             )
-            chunk_send_total_s += max(0.0, time.perf_counter() - t0)
-            if on_chunk_sent is not None:
-                avg_chunk_send_s = chunk_send_total_s / float(seq + 1)
-                try:
-                    on_chunk_sent(seq, total_chunks, avg_chunk_send_s)
-                except Exception as e:
-                    print(f"[client] on_chunk_sent error: {e}", file=sys.stderr)
-            seq += 1
             if pace and block.size > 0:
                 delay = (block.size / float(target_sr)) * pace_factor
                 time.sleep(delay)
+            now_ts = time.perf_counter()
+            chunk_cycle_total_s += max(0.0, now_ts - prev_cycle_ts)
+            prev_cycle_ts = now_ts
+            if on_chunk_sent is not None:
+                avg_chunk_cycle_s = chunk_cycle_total_s / float(seq + 1)
+                try:
+                    on_chunk_sent(seq, total_chunks, avg_chunk_cycle_s)
+                except Exception as e:
+                    print(f"[client] on_chunk_sent error: {e}", file=sys.stderr)
+            seq += 1
 
         # Очередь на ESP32 и TCP — дождаться drain перед dyn.off, иначе ответ теряется
         time.sleep(0.35)
