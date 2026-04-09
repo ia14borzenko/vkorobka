@@ -33,7 +33,7 @@ static const char* TAG = "vkorobka";
 #define WIFI_PASS "adminadmin"
 
 // Настройки TCP
-#define SERVER_IP   "192.168.43.236"
+#define SERVER_IP   "192.168.43.221"
 #define SERVER_PORT 1234
 
 // Глобальные объекты

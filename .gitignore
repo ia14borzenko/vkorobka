@@ -45,3 +45,4 @@ pyapp/fonts
 *.wav
 *.flac
 *.mp3
+esp32s3/sdkconfig
