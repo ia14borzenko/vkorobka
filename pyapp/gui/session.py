@@ -35,6 +35,10 @@ class AppSession:
         self.speaker_skip_dyn_set: bool = False
         self.speaker_dyn_mute: bool = False
         self.speaker_dyn_clip: bool = True
+        self.speaker_flow_control: bool = True
+        self.speaker_adaptive_pace: bool = True
+        self.speaker_max_ack_wait_s: float = 0.12
+        self.speaker_flow_window: int = 8
         # Настройки адаптивного порога тишины (источник: вкладка "Умная колонка").
         self.smart_silence_threshold: float = 6000.0
         self.smart_silence_adaptive: bool = True

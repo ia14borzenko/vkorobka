@@ -219,6 +219,11 @@ class SmartSpeakerTab(ttk.Frame):
             dyn_mute=bool(self.session.speaker_dyn_mute),
             dyn_clip=bool(self.session.speaker_dyn_clip),
             send_dyn_set=not bool(self.session.speaker_skip_dyn_set),
+            flow_control=bool(getattr(self.session, "speaker_flow_control", True)),
+            adaptive_pace=bool(getattr(self.session, "speaker_adaptive_pace", True)),
+            max_ack_wait_s=float(getattr(self.session, "speaker_max_ack_wait_s", 0.12)),
+            flow_window=int(getattr(self.session, "speaker_flow_window", 8)),
+            audio_priority_mode=str(getattr(self.session, "speaker_audio_priority_mode", "audio_first")),
         )
 
     def _on_state_changed(self, state: str) -> None:

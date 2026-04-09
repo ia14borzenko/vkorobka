@@ -331,6 +331,10 @@ def main() -> None:
     sp_skip_dyn_set_var = tk.BooleanVar(value=session.speaker_skip_dyn_set)
     sp_dyn_mute_var = tk.BooleanVar(value=session.speaker_dyn_mute)
     sp_dyn_clip_var = tk.BooleanVar(value=session.speaker_dyn_clip)
+    sp_flow_control_var = tk.BooleanVar(value=session.speaker_flow_control)
+    sp_adaptive_pace_var = tk.BooleanVar(value=session.speaker_adaptive_pace)
+    sp_ack_timeout_var = tk.StringVar(value=str(session.speaker_max_ack_wait_s))
+    sp_flow_window_var = tk.StringVar(value=str(session.speaker_flow_window))
     ttk.Label(left, text="chunk").grid(row=lrow, column=0, sticky=tk.W, padx=4, pady=2)
     ttk.Entry(left, textvariable=sp_chunk_var, width=8).grid(row=lrow, column=1, sticky=tk.W, padx=4, pady=2)
     ttk.Label(left, text="pace_factor").grid(row=lrow, column=2, sticky=tk.W, padx=4, pady=2)
@@ -354,6 +358,14 @@ def main() -> None:
     lrow += 1
     ttk.Checkbutton(left, text="dyn_mute", variable=sp_dyn_mute_var).grid(row=lrow, column=2, sticky=tk.W, padx=4, pady=2)
     ttk.Checkbutton(left, text="dyn_clip", variable=sp_dyn_clip_var).grid(row=lrow, column=3, sticky=tk.W, padx=4, pady=2)
+    lrow += 1
+    ttk.Label(left, text="ack_timeout_s").grid(row=lrow, column=0, sticky=tk.W, padx=4, pady=2)
+    ttk.Entry(left, textvariable=sp_ack_timeout_var, width=8).grid(row=lrow, column=1, sticky=tk.W, padx=4, pady=2)
+    ttk.Label(left, text="flow_window").grid(row=lrow, column=2, sticky=tk.W, padx=4, pady=2)
+    ttk.Entry(left, textvariable=sp_flow_window_var, width=8).grid(row=lrow, column=3, sticky=tk.W, padx=4, pady=2)
+    lrow += 1
+    ttk.Checkbutton(left, text="flow_control", variable=sp_flow_control_var).grid(row=lrow, column=2, sticky=tk.W, padx=4, pady=2)
+    ttk.Checkbutton(left, text="adaptive_pace", variable=sp_adaptive_pace_var).grid(row=lrow, column=3, sticky=tk.W, padx=4, pady=2)
 
     def _sync_shared_settings(*_args) -> None:
         session.mic_rate_hz = max(8000, min(96000, _safe_int(mic_rate_var.get(), session.mic_rate_hz)))
@@ -375,10 +387,14 @@ def main() -> None:
         session.speaker_skip_dyn_set = bool(sp_skip_dyn_set_var.get())
         session.speaker_dyn_mute = bool(sp_dyn_mute_var.get())
         session.speaker_dyn_clip = bool(sp_dyn_clip_var.get())
+        session.speaker_flow_control = bool(sp_flow_control_var.get())
+        session.speaker_adaptive_pace = bool(sp_adaptive_pace_var.get())
+        session.speaker_max_ack_wait_s = max(0.01, min(2.0, _safe_float(sp_ack_timeout_var.get(), session.speaker_max_ack_wait_s)))
+        session.speaker_flow_window = max(1, min(128, _safe_int(sp_flow_window_var.get(), session.speaker_flow_window)))
 
-    for v in (mic_rate_var, mic_bits_var, mic_gain_var, mic_chunk_var, mic_record_gain_var, sp_chunk_var, sp_pace_var, sp_timeout_var, sp_rate_var, sp_gain_var):
+    for v in (mic_rate_var, mic_bits_var, mic_gain_var, mic_chunk_var, mic_record_gain_var, sp_chunk_var, sp_pace_var, sp_timeout_var, sp_rate_var, sp_gain_var, sp_ack_timeout_var, sp_flow_window_var):
         v.trace_add("write", _sync_shared_settings)
-    for v in (mic_mute_var, mic_clip_var, sp_no_pace_var, sp_skip_dyn_set_var, sp_dyn_mute_var, sp_dyn_clip_var):
+    for v in (mic_mute_var, mic_clip_var, sp_no_pace_var, sp_skip_dyn_set_var, sp_dyn_mute_var, sp_dyn_clip_var, sp_flow_control_var, sp_adaptive_pace_var):
         v.trace_add("write", _sync_shared_settings)
     _sync_shared_settings()
 
@@ -442,7 +458,7 @@ def main() -> None:
         "- Результат: сохраняются WAV/FLAC/TSV; добавлены кнопки локального прослушивания WAV.\n\n"
         "5) Динамик\n"
         "- Назначение: отправка аудиофайла на динамик ESP32.\n"
-        "- Что настраивается: chunk_samples, pace_factor/no-pace, timeout, параметры dyn.set.\n"
+        "- Что настраивается: chunk_samples, pace_factor/no-pace, timeout, параметры dyn.set, flow_control/adaptive_pace, ack_timeout и flow_window.\n"
         "- Кнопка запускает последовательность dyn.set (опц) -> dyn.on -> PCM stream -> dyn.off.\n\n"
         "6) Умная колонка\n"
         "- Назначение: автоматический цикл сценария колонки.\n"

@@ -8,6 +8,7 @@
 #include "my_types.h"
 #include <string.h>
 #include <stdlib.h>
+#include <stdio.h>
 
 static const char* TAG = "message_dispatcher";
 
@@ -249,7 +250,25 @@ void message_dispatcher_handle_new_message(const msg_header_t* header, const u8*
         }
         if (header->stream_id == DYN_STREAM_ID)
         {
-            dyn_playback_feed(payload, payload_len);
+            const bool queued = dyn_playback_feed(payload, payload_len);
+            if (queued && g_message_bridge)
+            {
+                char ack[32];
+                const int n = snprintf(ack, sizeof(ack), "CHUNK_ACK_AUDIO:%u", (unsigned)header->sequence);
+                if (n > 0)
+                {
+                    msg_header_t rh = msg_create_header(
+                        MSG_TYPE_RESPONSE,
+                        MSG_SRC_ESP32,
+                        MSG_DST_EXTERNAL,
+                        220,
+                        0,
+                        (u32)n,
+                        0,
+                        MSG_ROUTE_NONE);
+                    g_message_bridge->send_message(rh, reinterpret_cast<const u8*>(ack), (u32)n);
+                }
+            }
             return;
         }
         ESP_LOGW(TAG, "Unknown stream_id=%u (not LCD/audio)", (unsigned)header->stream_id);

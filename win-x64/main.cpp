@@ -176,7 +176,7 @@ void handle_new_message(const msg_header_t& header, const u8* payload, u32 paylo
                 
                 // Проверяем, является ли это CHUNK_ACK (не очищаем test_id для него)
                 // CHUNK_ACK используется для flow control - Python ждёт подтверждения перед отправкой следующего чанка
-                if (payload_str.find("CHUNK_ACK:") == 0)
+                if (payload_str.find("CHUNK_ACK:") == 0 || payload_str.find("CHUNK_ACK_AUDIO:") == 0)
                 {
                     is_chunk_ack = true;
                     std::cout << ANSI_INFO << "[app] [HANDLE] This is a CHUNK_ACK, keeping test_id mapping" << ANSI_ENDL;

@@ -64,8 +64,8 @@ def main() -> int:
     parser.add_argument(
         "--dyn-rate",
         type=int,
-        default=VkorobkaClient.DYN_PCM_SAMPLE_RATE_HZ,
-        help="Частота dyn.set / PCM (белый список как на ESP32)",
+        default=16000,
+        help="Частота dyn.set / PCM (для речи рекомендовано 16000)",
     )
     parser.add_argument(
         "--dyn-bits",
@@ -84,6 +84,28 @@ def main() -> int:
         "--skip-dyn-set",
         action="store_true",
         help="Не отправлять dyn.set (уже настроено на устройстве)",
+    )
+    parser.add_argument(
+        "--no-flow-control",
+        action="store_true",
+        help="Отключить ожидание CHUNK_ACK_AUDIO (только для экспериментов)",
+    )
+    parser.add_argument(
+        "--no-adaptive-pace",
+        action="store_true",
+        help="Отключить адаптацию pace по latency подтверждений",
+    )
+    parser.add_argument(
+        "--ack-timeout",
+        type=float,
+        default=0.12,
+        help="Максимальное время ожидания ACK аудиочанка, сек",
+    )
+    parser.add_argument(
+        "--flow-window",
+        type=int,
+        default=8,
+        help="Размер окна неподтверждённых чанков для audio flow control",
     )
     args = parser.parse_args()
 
@@ -114,6 +136,10 @@ def main() -> int:
             dyn_bits=args.dyn_bits,
             dyn_gain_db=args.dyn_gain_db,
             send_dyn_set=not args.skip_dyn_set,
+            flow_control=not args.no_flow_control,
+            adaptive_pace=not args.no_adaptive_pace,
+            max_ack_wait_s=args.ack_timeout,
+            flow_window=args.flow_window,
         )
         return 0 if ok else 1
     finally:

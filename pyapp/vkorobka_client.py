@@ -177,12 +177,13 @@ class VkorobkaClient:
                 import base64
                 payload_bytes = base64.b64decode(payload_b64)
                 payload_decoded = payload_bytes.decode('utf-8', errors='ignore')
-                if payload_decoded.startswith('CHUNK_ACK:'):
+                if payload_decoded.startswith('CHUNK_ACK:') or payload_decoded.startswith('CHUNK_ACK_AUDIO:'):
                     # Это подтверждение чанка
                     try:
                         chunk_index_str = payload_decoded.split(':')[1]
                         chunk_index = int(chunk_index_str)
                         seq = message.get('seq', -1)
+                        is_audio_ack = payload_decoded.startswith('CHUNK_ACK_AUDIO:')
                         
                         # Используем текущий test_id из потока или ищем по chunk_index
                         with self.response_lock:
@@ -194,6 +195,11 @@ class VkorobkaClient:
                                     self.pending_chunk_acks[chunk_ack_key] = True
                                     print(f"[client] [CHUNK_ACK] Получено подтверждение для чанка {chunk_index} (test_id={self.current_stream_test_id}, seq={seq})")
                                     found = True
+                            audio_ack_key = f"audio:{chunk_index}"
+                            if not found and audio_ack_key in self.pending_chunk_acks:
+                                self.pending_chunk_acks[audio_ack_key] = True
+                                print(f"[client] [CHUNK_ACK_AUDIO] Получено подтверждение для чанка {chunk_index} (seq={seq})")
+                                found = True
                             
                             # Если не нашли, ищем любой ключ с таким chunk_index
                             if not found:
@@ -205,7 +211,9 @@ class VkorobkaClient:
                                         break
                             
                             if not found:
-                                print(f"[client] [CHUNK_ACK] Неожиданное подтверждение для чанка {chunk_index} (seq={seq})")
+                                # При отключенном audio flow control ACK-ы ожидаемы, но их не нужно спамить.
+                                if not is_audio_ack:
+                                    print(f"[client] [CHUNK_ACK] Неожиданное подтверждение для чанка {chunk_index} (seq={seq})")
                     except (ValueError, IndexError) as e:
                         print(f"[client] [CHUNK_ACK] Ошибка парсинга CHUNK_ACK: {e}, payload={payload_decoded}")
                     return
@@ -442,6 +450,7 @@ class VkorobkaClient:
         stream_id: int,
         seq: int,
         chunk_payload_b64: str,
+        priority: int = 128,
         test_id: Optional[str] = None,
         extra_fields: Optional[dict] = None,
         verbose: bool = True,
@@ -455,10 +464,10 @@ class VkorobkaClient:
             "type": "stream",
             "source": "external",
             "destination": destination,
-            "priority": 128,
+            "priority": int(priority),
             "stream_id": stream_id,
             "payload": chunk_payload_b64,
-            "seq": seq,
+            "seq": int(seq) & 0xFF,
         }
         if test_id:
             message["test_id"] = test_id
@@ -575,6 +584,7 @@ class VkorobkaClient:
                 stream_id=self.STREAM_ID_LCD_FRAME,
                 seq=chunk_index,
                 chunk_payload_b64=chunk_b64,
+                priority=96,
                 test_id=test_id,
                 extra_fields=None,
                 verbose=True,
@@ -636,6 +646,10 @@ class VkorobkaClient:
         dyn_mute: bool = False,
         dyn_clip: bool = True,
         send_dyn_set: bool = True,
+        flow_control: bool = True,
+        max_ack_wait_s: float = 0.12,
+        adaptive_pace: bool = True,
+        flow_window: int = 8,
         on_chunk_sent: Optional[Callable[[int, int, float], None]] = None,
     ) -> bool:
         """
@@ -722,21 +736,61 @@ class VkorobkaClient:
         seq = 0
         chunk_cycle_total_s = 0.0
         prev_cycle_ts = time.perf_counter()
+        ack_wait_hist = []
+        dropped_ack_count = 0
+        started_ts = time.perf_counter()
+        inflight_audio_ack_keys = []
         for start in range(0, n_total, chunk_samples):
             block = samples_i16[start : start + chunk_samples]
             payload = self.pack_pcm16_stream_payload_mono_dyn(block, sample_rate_hz=target_sr)
             chunk_b64 = image_to_base64(payload)
+            seq_byte = int(seq) & 0xFF
+            audio_ack_key = f"audio:{seq_byte}"
+            if flow_control:
+                with self.response_lock:
+                    self.pending_chunk_acks[audio_ack_key] = False
+                inflight_audio_ack_keys.append(audio_ack_key)
             self._send_stream_chunk(
                 destination="esp32",
                 stream_id=self.STREAM_ID_DYN_PCM,
-                seq=seq,
+                seq=seq_byte,
                 chunk_payload_b64=chunk_b64,
+                priority=220,
                 test_id=None,
                 extra_fields=None,
                 verbose=False,
             )
+            ack_wait_s = 0.0
+            if flow_control and block.size > 0:
+                # Credit-like flow control: ждём только при переполнении окна, а не на каждый чанк.
+                wait_begin = time.perf_counter()
+                while True:
+                    with self.response_lock:
+                        remaining = []
+                        for k in inflight_audio_ack_keys:
+                            if self.pending_chunk_acks.get(k):
+                                self.pending_chunk_acks.pop(k, None)
+                            else:
+                                remaining.append(k)
+                        inflight_audio_ack_keys = remaining
+                    if len(inflight_audio_ack_keys) < max(1, int(flow_window)):
+                        break
+                    if (time.perf_counter() - wait_begin) >= max_ack_wait_s:
+                        dropped_ack_count += 1
+                        # Сбрасываем самый старый ключ, чтобы не стопорить поток.
+                        oldest = inflight_audio_ack_keys.pop(0)
+                        with self.response_lock:
+                            self.pending_chunk_acks.pop(oldest, None)
+                        break
+                    time.sleep(0.002)
+                ack_wait_s = max(0.0, time.perf_counter() - wait_begin)
+                ack_wait_hist.append(ack_wait_s)
             if pace and block.size > 0:
                 delay = (block.size / float(target_sr)) * pace_factor
+                if adaptive_pace and ack_wait_hist:
+                    # Подстраиваем delay к реальному темпу приёма на устройстве.
+                    p95_ack = sorted(ack_wait_hist)[int(max(0, len(ack_wait_hist) * 0.95 - 1))]
+                    delay = max(delay, p95_ack * 0.85)
                 time.sleep(delay)
             now_ts = time.perf_counter()
             chunk_cycle_total_s += max(0.0, now_ts - prev_cycle_ts)
@@ -757,6 +811,16 @@ class VkorobkaClient:
         if not resp_off:
             print("[client] Предупреждение: нет ответа на dyn.off")
             return False
+        elapsed_s = max(0.001, time.perf_counter() - started_ts)
+        pcm_kbytes = float(n_total * 2) / 1024.0
+        ack_p95 = sorted(ack_wait_hist)[int(max(0, len(ack_wait_hist) * 0.95 - 1))] if ack_wait_hist else 0.0
+        avg_cycle_ms = (chunk_cycle_total_s / float(max(1, seq))) * 1000.0
+        print(
+            "[client] [DYN_METRICS] "
+            f"chunks={seq}, seconds={elapsed_s:.2f}, pcm_kbytes={pcm_kbytes:.1f}, "
+            f"throughput_kBps={pcm_kbytes/elapsed_s:.1f}, avg_chunk_cycle_ms={avg_cycle_ms:.2f}, "
+            f"ack_p95_ms={ack_p95*1000.0:.2f}, ack_timeouts={dropped_ack_count}"
+        )
         print("[client] Воспроизведение завершено (dyn.off OK)")
         return True
 

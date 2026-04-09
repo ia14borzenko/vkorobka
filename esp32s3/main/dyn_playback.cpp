@@ -19,6 +19,14 @@ static constexpr size_t BYTES_PER_PCM16 = 2;
 static constexpr u16 DYN_MAX_MONO_SAMPLES = 512;
 static constexpr u32 QUEUE_DEPTH = 16;
 static constexpr size_t SILENCE_STEREO_FRAMES_ON_OFF = 256;
+// Слишком большой пул съедает heap и ломает крупные TEXT_ADD в smart speaker.
+// 8 блоков достаточно для текущего аудиотракта и оставляет память под текстинг.
+static constexpr u32 CHUNK_POOL_SIZE = 8;
+static constexpr u16 WATERMARK_START_CHUNKS = 4;
+static constexpr TickType_t I2S_WRITE_TIMEOUT_TICKS = pdMS_TO_TICKS(80);
+static constexpr TickType_t STATS_LOG_PERIOD_TICKS = pdMS_TO_TICKS(2000);
+static constexpr UBaseType_t PLAYBACK_TASK_PRIORITY = 12;
+static constexpr BaseType_t PLAYBACK_TASK_CORE = 1;
 
 // Поддерживаемые LRCLK для MAX98357 / I2S (белый список).
 static bool dyn_rate_allowed(u32 rate_hz)
@@ -69,9 +77,19 @@ static int32_t* chunk_samples(DynPcmChunk* c)
 
 static i2s_chan_handle_t s_tx = nullptr;
 static QueueHandle_t s_queue = nullptr;
+static QueueHandle_t s_free_pool = nullptr;
 static std::atomic<bool> s_armed{false};
+static std::atomic<bool> s_started{false};
 static portMUX_TYPE s_cfg_mu = portMUX_INITIALIZER_UNLOCKED;
 static DynPlaybackConfig s_cfg;
+static std::atomic<uint32_t> s_stat_rx_chunks{0};
+static std::atomic<uint32_t> s_stat_alloc_fail{0};
+static std::atomic<uint32_t> s_stat_bad_hdr{0};
+static std::atomic<uint32_t> s_stat_short_payload{0};
+static std::atomic<uint32_t> s_stat_drops{0};
+static std::atomic<uint32_t> s_stat_underrun_ticks{0};
+static std::atomic<uint32_t> s_stat_write_timeouts{0};
+static std::atomic<uint32_t> s_stat_i2s_errors{0};
 
 static size_t chunk_alloc_bytes(u16 stereo_frames)
 {
@@ -100,7 +118,7 @@ static void sd_mode_run(void)
 
 static void drain_queue_free(void)
 {
-    if (!s_queue)
+    if (!s_queue || !s_free_pool)
     {
         return;
     }
@@ -109,8 +127,34 @@ static void drain_queue_free(void)
     {
         if (c)
         {
-            heap_caps_free(c);
+            (void)xQueueSend(s_free_pool, &c, 0);
         }
+    }
+}
+
+static DynPcmChunk* pool_acquire(void)
+{
+    if (!s_free_pool)
+    {
+        return nullptr;
+    }
+    DynPcmChunk* c = nullptr;
+    if (xQueueReceive(s_free_pool, &c, 0) == pdTRUE)
+    {
+        return c;
+    }
+    return nullptr;
+}
+
+static void pool_release(DynPcmChunk* c)
+{
+    if (!c || !s_free_pool)
+    {
+        return;
+    }
+    if (xQueueSend(s_free_pool, &c, 0) != pdTRUE)
+    {
+        heap_caps_free(c);
     }
 }
 
@@ -148,8 +192,8 @@ static esp_err_t dyn_i2s_tx_init_from_config(const DynPlaybackConfig& cfg)
     dyn_i2s_tx_shutdown();
 
     i2s_chan_config_t chan_cfg = I2S_CHANNEL_DEFAULT_CONFIG(I2S_NUM_1, I2S_ROLE_MASTER);
-    chan_cfg.dma_desc_num = 8;
-    chan_cfg.dma_frame_num = 256;
+    chan_cfg.dma_desc_num = 12;
+    chan_cfg.dma_frame_num = 384;
     esp_err_t err = i2s_new_channel(&chan_cfg, &s_tx, nullptr);
     if (err != ESP_OK)
     {
@@ -206,31 +250,66 @@ static void enqueue_chunk_drop_oldest(DynPcmChunk* chunk)
         DynPcmChunk* old = nullptr;
         if (xQueueReceive(s_queue, &old, 0) != pdTRUE)
         {
-            heap_caps_free(chunk);
+            pool_release(chunk);
             return;
         }
         if (old)
         {
-            heap_caps_free(old);
+            s_stat_drops.fetch_add(1, std::memory_order_relaxed);
+            pool_release(old);
         }
     }
+}
+
+static void log_runtime_stats_if_due(TickType_t* last_log_tick)
+{
+    const TickType_t now = xTaskGetTickCount();
+    if ((now - *last_log_tick) < STATS_LOG_PERIOD_TICKS)
+    {
+        return;
+    }
+    *last_log_tick = now;
+    const UBaseType_t q_used = s_queue ? uxQueueMessagesWaiting(s_queue) : 0;
+    const UBaseType_t q_free = s_free_pool ? uxQueueMessagesWaiting(s_free_pool) : 0;
+    ESP_LOGI(TAG,
+             "stats rx=%u drop=%u alloc_fail=%u bad_hdr=%u short=%u underrun=%u wr_to=%u i2s_err=%u q_used=%u q_free=%u started=%d",
+             (unsigned)s_stat_rx_chunks.load(std::memory_order_relaxed),
+             (unsigned)s_stat_drops.load(std::memory_order_relaxed),
+             (unsigned)s_stat_alloc_fail.load(std::memory_order_relaxed),
+             (unsigned)s_stat_bad_hdr.load(std::memory_order_relaxed),
+             (unsigned)s_stat_short_payload.load(std::memory_order_relaxed),
+             (unsigned)s_stat_underrun_ticks.load(std::memory_order_relaxed),
+             (unsigned)s_stat_write_timeouts.load(std::memory_order_relaxed),
+             (unsigned)s_stat_i2s_errors.load(std::memory_order_relaxed),
+             (unsigned)q_used, (unsigned)q_free,
+             s_started.load(std::memory_order_relaxed) ? 1 : 0);
 }
 
 static void dyn_playback_task(void* arg)
 {
     (void)arg;
     ESP_LOGI(TAG, "playback task running");
+    TickType_t last_log_tick = xTaskGetTickCount();
 
     for (;;)
     {
         DynPcmChunk* chunk = nullptr;
         if (xQueueReceive(s_queue, &chunk, pdMS_TO_TICKS(20)) != pdTRUE || chunk == nullptr)
         {
+            log_runtime_stats_if_due(&last_log_tick);
             if (s_armed.load(std::memory_order_relaxed) && s_tx)
             {
-                static int32_t zero_pair[2] = {0, 0};
-                size_t w = 0;
-                (void)i2s_channel_write(s_tx, zero_pair, sizeof(zero_pair), &w, pdMS_TO_TICKS(40));
+                if (s_started.load(std::memory_order_relaxed))
+                {
+                    static int32_t zero_pair[2] = {0, 0};
+                    size_t w = 0;
+                    (void)i2s_channel_write(s_tx, zero_pair, sizeof(zero_pair), &w, pdMS_TO_TICKS(40));
+                    s_stat_underrun_ticks.fetch_add(1, std::memory_order_relaxed);
+                }
+                else if (uxQueueMessagesWaiting(s_queue) >= WATERMARK_START_CHUNKS)
+                {
+                    s_started.store(true, std::memory_order_relaxed);
+                }
             }
             continue;
         }
@@ -241,10 +320,17 @@ static void dyn_playback_task(void* arg)
         while (remaining > 0 && s_tx)
         {
             size_t wrote = 0;
-            esp_err_t e = i2s_channel_write(s_tx, p, remaining, &wrote, portMAX_DELAY);
+            esp_err_t e = i2s_channel_write(s_tx, p, remaining, &wrote, I2S_WRITE_TIMEOUT_TICKS);
             if (e != ESP_OK)
             {
-                ESP_LOGW(TAG, "i2s_channel_write: 0x%x", e);
+                if (e == ESP_ERR_TIMEOUT)
+                {
+                    s_stat_write_timeouts.fetch_add(1, std::memory_order_relaxed);
+                }
+                else
+                {
+                    s_stat_i2s_errors.fetch_add(1, std::memory_order_relaxed);
+                }
                 break;
             }
             if (wrote == 0)
@@ -254,7 +340,8 @@ static void dyn_playback_task(void* arg)
             remaining -= wrote;
             p = (const int32_t*)((const uint8_t*)p + wrote);
         }
-        heap_caps_free(chunk);
+        pool_release(chunk);
+        log_runtime_stats_if_due(&last_log_tick);
     }
 }
 
@@ -277,24 +364,37 @@ void dyn_playback_init(void)
     }
 
     s_queue = xQueueCreate(QUEUE_DEPTH, sizeof(DynPcmChunk*));
-    if (!s_queue)
+    s_free_pool = xQueueCreate(CHUNK_POOL_SIZE, sizeof(DynPcmChunk*));
+    if (!s_queue || !s_free_pool)
     {
-        ESP_LOGE(TAG, "queue create failed");
+        ESP_LOGE(TAG, "queue create failed (work/free)");
         return;
     }
+    for (u32 i = 0; i < CHUNK_POOL_SIZE; ++i)
+    {
+        DynPcmChunk* blk = (DynPcmChunk*)heap_caps_malloc(chunk_alloc_bytes(DYN_MAX_MONO_SAMPLES), MALLOC_CAP_DEFAULT);
+        if (!blk)
+        {
+            ESP_LOGE(TAG, "pool alloc failed at index=%u", (unsigned)i);
+            break;
+        }
+        blk->n_stereo_frames = 0;
+        blk->_pad = 0;
+        (void)xQueueSend(s_free_pool, &blk, 0);
+    }
 
-    if (xTaskCreatePinnedToCore(dyn_playback_task, "dyn_playback", 4096, nullptr, 6, nullptr,
-                                tskNO_AFFINITY) != pdPASS)
+    if (xTaskCreatePinnedToCore(dyn_playback_task, "dyn_playback", 4096, nullptr, PLAYBACK_TASK_PRIORITY, nullptr,
+                                PLAYBACK_TASK_CORE) != pdPASS)
     {
         ESP_LOGE(TAG, "task create failed");
     }
 }
 
-void dyn_playback_feed(const u8* payload, u32 payload_len)
+bool dyn_playback_feed(const u8* payload, u32 payload_len)
 {
     if (!s_tx || !s_queue || !s_armed.load(std::memory_order_relaxed))
     {
-        return;
+        return false;
     }
 
     DynPlaybackConfig cfg;
@@ -305,39 +405,42 @@ void dyn_playback_feed(const u8* payload, u32 payload_len)
     const u32 hdr_sz = (u32)sizeof(PcmStreamHeader);
     if (payload_len < hdr_sz)
     {
-        return;
+        s_stat_bad_hdr.fetch_add(1, std::memory_order_relaxed);
+        return false;
     }
 
     const PcmStreamHeader* hdr = (const PcmStreamHeader*)payload;
     if (hdr->sample_rate_hz != cfg.rate_hz || hdr->bits_per_sample != cfg.bits ||
         hdr->sample_count == 0 || hdr->sample_count > DYN_MAX_MONO_SAMPLES)
     {
+        s_stat_bad_hdr.fetch_add(1, std::memory_order_relaxed);
         ESP_LOGW(TAG, "bad hdr: rate=%u bits=%u n=%u (expect %u Hz, %u-bit)",
                  (unsigned)hdr->sample_rate_hz, (unsigned)hdr->bits_per_sample,
                  (unsigned)hdr->sample_count, (unsigned)cfg.rate_hz, (unsigned)cfg.bits);
-        return;
+        return false;
     }
 
     if (cfg.bits != DYN_BITS_PER_SAMPLE)
     {
-        return;
+        s_stat_bad_hdr.fetch_add(1, std::memory_order_relaxed);
+        return false;
     }
 
     const u32 pcm_bytes = (u32)hdr->sample_count * BYTES_PER_PCM16;
     if (payload_len < hdr_sz + pcm_bytes)
     {
+        s_stat_short_payload.fetch_add(1, std::memory_order_relaxed);
         ESP_LOGW(TAG, "short payload: %u < %u", (unsigned)payload_len,
                  (unsigned)(hdr_sz + pcm_bytes));
-        return;
+        return false;
     }
 
     const u16 n = hdr->sample_count;
-    const size_t alloc_b = chunk_alloc_bytes(n);
-    DynPcmChunk* chunk = (DynPcmChunk*)heap_caps_malloc(alloc_b, MALLOC_CAP_DEFAULT);
+    DynPcmChunk* chunk = pool_acquire();
     if (!chunk)
     {
-        ESP_LOGE(TAG, "chunk alloc failed");
-        return;
+        s_stat_alloc_fail.fetch_add(1, std::memory_order_relaxed);
+        return false;
     }
     chunk->n_stereo_frames = n;
     chunk->_pad = 0;
@@ -376,6 +479,8 @@ void dyn_playback_feed(const u8* payload, u32 payload_len)
     }
 
     enqueue_chunk_drop_oldest(chunk);
+    s_stat_rx_chunks.fetch_add(1, std::memory_order_relaxed);
+    return true;
 }
 
 void dyn_playback_set_armed(bool armed)
@@ -383,6 +488,7 @@ void dyn_playback_set_armed(bool armed)
     if (armed)
     {
         drain_queue_free();
+        s_started.store(false, std::memory_order_relaxed);
         s_armed.store(true, std::memory_order_relaxed);
         sd_mode_run();
         ESP_LOGI(TAG, "armed ON");
@@ -390,6 +496,7 @@ void dyn_playback_set_armed(bool armed)
     else
     {
         s_armed.store(false, std::memory_order_relaxed);
+        s_started.store(false, std::memory_order_relaxed);
         drain_queue_free();
         write_silence_stereo(SILENCE_STEREO_FRAMES_ON_OFF);
         sd_mode_shutdown();

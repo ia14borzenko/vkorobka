@@ -61,6 +61,11 @@ class SpeakerConfig:
     dyn_mute: bool = False
     dyn_clip: bool = True
     send_dyn_set: bool = True
+    flow_control: bool = True
+    adaptive_pace: bool = True
+    max_ack_wait_s: float = 0.12
+    flow_window: int = 8
+    audio_priority_mode: str = "audio_first"
 
 
 class SmartSpeakerOrchestrator:
@@ -381,6 +386,8 @@ class SmartSpeakerOrchestrator:
 
         client = self.client_getter()
         sp = self.speaker_cfg_getter() if self.speaker_cfg_getter else SpeakerConfig()
+        if sp.audio_priority_mode == "audio_first":
+            self.log("[smart] QoS: audio-first mode active (display updates minimized during playback)")
         ok = client.play_audio_file_to_esp32_dyn(
             str(path),
             chunk_samples=sp.chunk_samples,
@@ -393,6 +400,10 @@ class SmartSpeakerOrchestrator:
             dyn_mute=sp.dyn_mute,
             dyn_clip=sp.dyn_clip,
             send_dyn_set=sp.send_dyn_set,
+            flow_control=sp.flow_control,
+            adaptive_pace=sp.adaptive_pace,
+            max_ack_wait_s=sp.max_ack_wait_s,
+            flow_window=sp.flow_window,
         )
         if not ok:
             self.log("[smart] Предупреждение: audio playback завершился с ошибкой")
@@ -418,6 +429,10 @@ class SmartSpeakerOrchestrator:
             dyn_mute=sp.dyn_mute,
             dyn_clip=sp.dyn_clip,
             send_dyn_set=sp.send_dyn_set,
+            flow_control=sp.flow_control,
+            adaptive_pace=sp.adaptive_pace,
+            max_ack_wait_s=sp.max_ack_wait_s,
+            flow_window=sp.flow_window,
         )
         if not ok:
             self.log("[smart] Предупреждение: audio playback завершился с ошибкой")
