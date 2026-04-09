@@ -13,7 +13,7 @@ static const char* TAG = "tcp";
 extern message_bridge_t* g_message_bridge;
 
 tcp_t::tcp_t(const char* server_ip, int server_port, wifi_t* wifi)
-    : server_ip(server_ip)
+    : server_ip(server_ip != nullptr ? server_ip : "")
     , server_port(server_port)
     , wifi(wifi)
     , sock(-1)
@@ -136,6 +136,46 @@ bool tcp_t::send_packet(cmdcode_t cmd_code, const void* payload, u32 payload_len
 bool tcp_t::send_packet_str(cmdcode_t cmd_code, const char* str)
 {
     return send_packet(cmd_code, str, static_cast<u32>(strlen(str)));
+}
+
+bool tcp_t::update_server_endpoint(const char* new_server_ip, int new_server_port, bool reconnect_now)
+{
+    if (new_server_ip == nullptr || new_server_ip[0] == '\0')
+    {
+        ESP_LOGE(TAG, "update_server_endpoint: empty server IP");
+        return false;
+    }
+    if (new_server_port <= 0 || new_server_port > 65535)
+    {
+        ESP_LOGE(TAG, "update_server_endpoint: invalid port %d", new_server_port);
+        return false;
+    }
+
+    bool was_started = (task_handle != nullptr);
+    if (reconnect_now && was_started)
+    {
+        stop();
+    }
+
+    server_ip = new_server_ip;
+    server_port = new_server_port;
+    ESP_LOGI(TAG, "Server endpoint updated to %s:%d", server_ip.c_str(), server_port);
+
+    if (reconnect_now && was_started)
+    {
+        return start();
+    }
+    return true;
+}
+
+const char* tcp_t::get_server_ip(void) const
+{
+    return server_ip.c_str();
+}
+
+int tcp_t::get_server_port(void) const
+{
+    return server_port;
 }
 
 bool tcp_t::connection_alive(int sock) const
@@ -411,13 +451,13 @@ void tcp_t::tcp_client_task(void* pvParameters)
 bool tcp_t::connect_to_server(tcp_t* tcp)
 {
     // Проверка валидности указателя
-    if (tcp == nullptr || tcp->server_ip == nullptr)
+    if (tcp == nullptr || tcp->server_ip.empty())
     {
         ESP_LOGE(TAG, "Invalid tcp pointer or server_ip in connect_to_server");
         return false;
     }
     
-    ESP_LOGI(TAG, "TCP state: CONNECTING to %s:%d", tcp->server_ip, tcp->server_port);
+    ESP_LOGI(TAG, "TCP state: CONNECTING to %s:%d", tcp->server_ip.c_str(), tcp->server_port);
     
     // Создаем сокет
     int sock = socket(AF_INET, SOCK_STREAM, IPPROTO_IP);
@@ -440,7 +480,7 @@ bool tcp_t::connect_to_server(tcp_t* tcp)
     
     // Настраиваем адрес сервера
     struct sockaddr_in dest_addr;
-    dest_addr.sin_addr.s_addr = inet_addr(tcp->server_ip);
+    dest_addr.sin_addr.s_addr = inet_addr(tcp->server_ip.c_str());
     dest_addr.sin_family = AF_INET;
     dest_addr.sin_port = htons(tcp->server_port);
     
@@ -498,7 +538,7 @@ bool tcp_t::connect_to_server(tcp_t* tcp)
     tcp->connected = true;
     tcp->rx_buffer.clear();
     
-    ESP_LOGI(TAG, "Connected successfully to %s:%d (socket: %d)", tcp->server_ip, tcp->server_port, sock);
+    ESP_LOGI(TAG, "Connected successfully to %s:%d (socket: %d)", tcp->server_ip.c_str(), tcp->server_port, sock);
     return true;
 }
 

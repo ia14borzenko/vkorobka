@@ -1,6 +1,7 @@
 idf_component_register(
     SRCS
         "main.cpp"
+        "app_config.cpp"
         "ili9486_display.cpp"
         "i80_lcd_bus.cpp"
         "wifi.cpp"

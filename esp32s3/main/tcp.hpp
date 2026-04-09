@@ -6,6 +6,7 @@
 #include "freertos/event_groups.h"
 #include "lwip/sockets.h"
 #include <vector>
+#include <string>
 #include "netpack.h"
 #include "wifi.hpp"
 
@@ -54,8 +55,15 @@ public:
     // Удобная перегрузка для отправки строки
     bool send_packet_str(cmdcode_t cmd_code, const char* str);
 
+    // Изменение endpoint сервера в runtime с опциональным reconnect
+    bool update_server_endpoint(const char* new_server_ip, int new_server_port, bool reconnect_now = true);
+
+    // Получить текущий endpoint
+    const char* get_server_ip(void) const;
+    int get_server_port(void) const;
+
 private:
-    const char* server_ip;
+    std::string server_ip;
     int server_port;
     wifi_t* wifi;
     
