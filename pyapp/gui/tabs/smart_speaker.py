@@ -46,7 +46,7 @@ class SmartSpeakerTab(ttk.Frame):
         self.field_w_var = tk.StringVar(value="380")
         self.field_h_var = tk.StringVar(value="120")
         self.char_h_var = tk.StringVar(value="14")
-        self.line_sp_var = tk.StringVar(value="2")
+        self.line_sp_var = tk.StringVar(value="14")
 
         self.audio_path_var = tk.StringVar(value="")
         self._build_ui()
@@ -221,7 +221,7 @@ class SmartSpeakerTab(ttk.Frame):
             send_dyn_set=not bool(self.session.speaker_skip_dyn_set),
             flow_control=bool(getattr(self.session, "speaker_flow_control", True)),
             adaptive_pace=bool(getattr(self.session, "speaker_adaptive_pace", True)),
-            max_ack_wait_s=float(getattr(self.session, "speaker_max_ack_wait_s", 0.12)),
+            max_ack_wait_s=float(getattr(self.session, "speaker_max_ack_wait_s", 0.005)),
             flow_window=int(getattr(self.session, "speaker_flow_window", 8)),
             audio_priority_mode=str(getattr(self.session, "speaker_audio_priority_mode", "audio_first")),
         )

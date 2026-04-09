@@ -24,7 +24,6 @@ static constexpr size_t SILENCE_STEREO_FRAMES_ON_OFF = 256;
 static constexpr u32 CHUNK_POOL_SIZE = 8;
 static constexpr u16 WATERMARK_START_CHUNKS = 4;
 static constexpr TickType_t I2S_WRITE_TIMEOUT_TICKS = pdMS_TO_TICKS(80);
-static constexpr TickType_t STATS_LOG_PERIOD_TICKS = pdMS_TO_TICKS(2000);
 static constexpr UBaseType_t PLAYBACK_TASK_PRIORITY = 12;
 static constexpr BaseType_t PLAYBACK_TASK_CORE = 1;
 
@@ -261,42 +260,16 @@ static void enqueue_chunk_drop_oldest(DynPcmChunk* chunk)
     }
 }
 
-static void log_runtime_stats_if_due(TickType_t* last_log_tick)
-{
-    const TickType_t now = xTaskGetTickCount();
-    if ((now - *last_log_tick) < STATS_LOG_PERIOD_TICKS)
-    {
-        return;
-    }
-    *last_log_tick = now;
-    const UBaseType_t q_used = s_queue ? uxQueueMessagesWaiting(s_queue) : 0;
-    const UBaseType_t q_free = s_free_pool ? uxQueueMessagesWaiting(s_free_pool) : 0;
-    ESP_LOGI(TAG,
-             "stats rx=%u drop=%u alloc_fail=%u bad_hdr=%u short=%u underrun=%u wr_to=%u i2s_err=%u q_used=%u q_free=%u started=%d",
-             (unsigned)s_stat_rx_chunks.load(std::memory_order_relaxed),
-             (unsigned)s_stat_drops.load(std::memory_order_relaxed),
-             (unsigned)s_stat_alloc_fail.load(std::memory_order_relaxed),
-             (unsigned)s_stat_bad_hdr.load(std::memory_order_relaxed),
-             (unsigned)s_stat_short_payload.load(std::memory_order_relaxed),
-             (unsigned)s_stat_underrun_ticks.load(std::memory_order_relaxed),
-             (unsigned)s_stat_write_timeouts.load(std::memory_order_relaxed),
-             (unsigned)s_stat_i2s_errors.load(std::memory_order_relaxed),
-             (unsigned)q_used, (unsigned)q_free,
-             s_started.load(std::memory_order_relaxed) ? 1 : 0);
-}
-
 static void dyn_playback_task(void* arg)
 {
     (void)arg;
     ESP_LOGI(TAG, "playback task running");
-    TickType_t last_log_tick = xTaskGetTickCount();
 
     for (;;)
     {
         DynPcmChunk* chunk = nullptr;
         if (xQueueReceive(s_queue, &chunk, pdMS_TO_TICKS(20)) != pdTRUE || chunk == nullptr)
         {
-            log_runtime_stats_if_due(&last_log_tick);
             if (s_armed.load(std::memory_order_relaxed) && s_tx)
             {
                 if (s_started.load(std::memory_order_relaxed))
@@ -341,7 +314,6 @@ static void dyn_playback_task(void* arg)
             p = (const int32_t*)((const uint8_t*)p + wrote);
         }
         pool_release(chunk);
-        log_runtime_stats_if_due(&last_log_tick);
     }
 }
 

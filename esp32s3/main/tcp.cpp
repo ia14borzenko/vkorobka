@@ -216,29 +216,10 @@ void tcp_t::process_rx_buffer(void)
                                       static_cast<u32>(rx_buffer.size()), 
                                       &header, &payload, &payload_len);
         
-        ESP_LOGD(TAG, "[DEBUG] TCP unpack: result=%d, payload_len=%u, header.payload_len=%u",
-                 unpack_result, payload_len, header.payload_len);
-        
         if (unpack_result)
         {
             // Проверяем, есть ли полный пакет
             u32 expected_total = MSG_HEADER_LEN + payload_len;
-            
-            ESP_LOGD(TAG, "[DEBUG] TCP: expected_total=%u, rx_buffer.size()=%zu", expected_total,
-                     rx_buffer.size());
-
-            if (rx_buffer.size() >= MSG_HEADER_LEN)
-            {
-                char hex_buf[64];
-                int hex_len = 0;
-                for (int i = 0; i < MSG_HEADER_LEN && i < 12; i++)
-                {
-                    hex_len += sprintf(hex_buf + hex_len, "%02X ", rx_buffer[i]);
-                }
-                ESP_LOGD(TAG, "[DEBUG] TCP header bytes: %s", hex_buf);
-                ESP_LOGD(TAG, "[DEBUG] TCP payload_len bytes [7-10]: %02X %02X %02X %02X", rx_buffer[7],
-                         rx_buffer[8], rx_buffer[9], rx_buffer[10]);
-            }
             
             if (rx_buffer.size() >= expected_total)
             {

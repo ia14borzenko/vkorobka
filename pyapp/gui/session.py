@@ -13,7 +13,7 @@ class AppSession:
         self._status: Optional[Callable[[str], None]] = None
         self.host: str = "127.0.0.1"
         self.port: int = 1236
-        self.timeout: float = 30.0
+        self.timeout: float = 5.0
         self.verbose_udp: bool = False
         self.destination: str = "esp32"
         self._client: Optional[VkorobkaClient] = None
@@ -35,9 +35,9 @@ class AppSession:
         self.speaker_skip_dyn_set: bool = False
         self.speaker_dyn_mute: bool = False
         self.speaker_dyn_clip: bool = True
-        self.speaker_flow_control: bool = True
-        self.speaker_adaptive_pace: bool = True
-        self.speaker_max_ack_wait_s: float = 0.12
+        self.speaker_flow_control: bool = False
+        self.speaker_adaptive_pace: bool = False
+        self.speaker_max_ack_wait_s: float = 0.005
         self.speaker_flow_window: int = 8
         # Настройки адаптивного порога тишины (источник: вкладка "Умная колонка").
         self.smart_silence_threshold: float = 6000.0

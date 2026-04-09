@@ -389,7 +389,7 @@ def main() -> None:
         session.speaker_dyn_clip = bool(sp_dyn_clip_var.get())
         session.speaker_flow_control = bool(sp_flow_control_var.get())
         session.speaker_adaptive_pace = bool(sp_adaptive_pace_var.get())
-        session.speaker_max_ack_wait_s = max(0.01, min(2.0, _safe_float(sp_ack_timeout_var.get(), session.speaker_max_ack_wait_s)))
+        session.speaker_max_ack_wait_s = max(0.001, min(2.0, _safe_float(sp_ack_timeout_var.get(), session.speaker_max_ack_wait_s)))
         session.speaker_flow_window = max(1, min(128, _safe_int(sp_flow_window_var.get(), session.speaker_flow_window)))
 
     for v in (mic_rate_var, mic_bits_var, mic_gain_var, mic_chunk_var, mic_record_gain_var, sp_chunk_var, sp_pace_var, sp_timeout_var, sp_rate_var, sp_gain_var, sp_ack_timeout_var, sp_flow_window_var):

@@ -54,7 +54,7 @@ def main() -> int:
         default=0.97,
         help="Доля реального времени между чанками при pace (0..1)",
     )
-    parser.add_argument("--timeout", type=float, default=30.0, help="Таймаут UDP recv")
+    parser.add_argument("--timeout", type=float, default=5.0, help="Таймаут UDP recv")
     parser.add_argument(
         "--command-timeout",
         type=float,
@@ -98,7 +98,7 @@ def main() -> int:
     parser.add_argument(
         "--ack-timeout",
         type=float,
-        default=0.12,
+        default=0.005,
         help="Максимальное время ожидания ACK аудиочанка, сек",
     )
     parser.add_argument(

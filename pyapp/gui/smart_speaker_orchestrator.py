@@ -26,7 +26,7 @@ class TextingConfig:
     field_width: int = 380
     field_height: int = 120
     char_height: int = 14
-    line_spacing: int = 2
+    line_spacing: int = 14
     manual_chars_per_sec: float = 20.0
     auto_speed: bool = True
     min_auto_cps: float = 8.0
@@ -61,9 +61,9 @@ class SpeakerConfig:
     dyn_mute: bool = False
     dyn_clip: bool = True
     send_dyn_set: bool = True
-    flow_control: bool = True
-    adaptive_pace: bool = True
-    max_ack_wait_s: float = 0.12
+    flow_control: bool = False
+    adaptive_pace: bool = False
+    max_ack_wait_s: float = 0.005
     flow_window: int = 8
     audio_priority_mode: str = "audio_first"
 

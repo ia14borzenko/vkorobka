@@ -3,7 +3,6 @@
 #include "udp_api.hpp"
 #include <iostream>
 #include <sstream>
-#include <iomanip>
 #include <algorithm>
 #include <vector>
 
@@ -248,18 +247,13 @@ bool message_router_t::send_message(const msg_header_t& header, const u8* payloa
 {
     std::lock_guard<std::mutex> lock(mutex_);
     
-    std::cout << "[router] [DEBUG] send_message called: dst=" << static_cast<int>(header.destination_id) 
-              << ", payload_len=" << payload_len << ", header.payload_len=" << header.payload_len << std::endl;
-    
     // Упаковываем сообщение
     std::vector<u8> buffer(MSG_HEADER_LEN + payload_len);
     u32 packed_size = msg_pack(&header, payload, payload_len, buffer.data());
     
-    std::cout << "[router] [DEBUG] msg_pack result: packed_size=" << packed_size << std::endl;
-    
     if (packed_size == 0)
     {
-        std::cerr << "[router] [ERROR] msg_pack failed!" << std::endl;
+        std::cerr << "[router] msg_pack failed" << std::endl;
         return false;
     }
     
@@ -268,13 +262,11 @@ bool message_router_t::send_message(const msg_header_t& header, const u8* payloa
     // Определяем транспорт в зависимости от получателя
     if (dst == MSG_DST_ESP32)
     {
-        std::cout << "[router] [DEBUG] Sending to ESP32 via TCP, total size=" << packed_size << " bytes" << std::endl;
         // Отправляем через TCP (к ESP32)
         if (tcp_transport_ && tcp_transport_->is_connected())
         {
             // Используем существующий метод send для отправки бинарных данных
             bool result = tcp_transport_->send(reinterpret_cast<const char*>(buffer.data()), static_cast<int>(packed_size));
-            std::cout << "[router] [DEBUG] TCP send result: " << (result ? "SUCCESS" : "FAILED") << std::endl;
             return result;
         }
         else
@@ -419,28 +411,12 @@ bool message_router_t::parse_json_message(const std::string& json_str, msg_heade
     if (payload_pos != std::string::npos)
     {
         std::string payload_str = extract_json_value(json_str, "payload");
-        std::cout << "[router] [DEBUG] Extracted payload base64 string length: " << payload_str.length() << std::endl;
-        if (payload_str.length() > 0 && payload_str.length() <= 100)
-        {
-            std::cout << "[router] [DEBUG] Payload base64 (first 100 chars): " << payload_str << std::endl;
-        }
         // Декодируем base64
         payload = base64_decode(payload_str);
-        std::cout << "[router] [DEBUG] Decoded payload size: " << payload.size() << " bytes" << std::endl;
-        if (payload.size() > 0 && payload.size() <= 16)
-        {
-            std::cout << "[router] [DEBUG] Payload data (hex): ";
-            for (size_t i = 0; i < payload.size(); ++i)
-            {
-                std::cout << std::hex << std::setw(2) << std::setfill('0') << static_cast<int>(payload[i]) << " ";
-            }
-            std::cout << std::dec << std::endl;
-        }
     }
     else
     {
         payload.clear();
-        std::cout << "[router] [DEBUG] No payload field found in JSON" << std::endl;
     }
     
     // Парсим test_id если есть
@@ -452,7 +428,6 @@ bool message_router_t::parse_json_message(const std::string& json_str, msg_heade
     }
     
     header.payload_len = static_cast<u32>(payload.size());
-    std::cout << "[router] [DEBUG] Final header.payload_len: " << header.payload_len << std::endl;
     header.route_flags = 0;
     
     return true;

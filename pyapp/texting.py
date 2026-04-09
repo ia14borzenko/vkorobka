@@ -27,7 +27,7 @@ class TextingManager:
         field_width: int = 380,
         field_height: int = 120,
         char_height: int = 14,
-        line_spacing: int = 2,
+        line_spacing: int = 14,
         typing_speed_ms: int = 50,
         font_path: str = "fonts/font.ttf",
         chars_dir: str = "fonts/chars",

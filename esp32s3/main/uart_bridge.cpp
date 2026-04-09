@@ -166,19 +166,14 @@ bool uart_bridge_t::send_message(const msg_header_t* header, const u8* payload, 
         return false;
     }
 
-    ESP_LOGI(TAG, "[DEBUG] send_message: dst=%d, payload_len=%u, header->payload_len=%u", 
-             header->destination_id, payload_len, header->payload_len);
-
     // Упаковываем сообщение
     u32 total_size = MSG_HEADER_LEN + payload_len;
     std::vector<u8>* buffer = new std::vector<u8>(total_size);
     
     u32 packed_size = msg_pack(header, payload, payload_len, buffer->data());
-    ESP_LOGI(TAG, "[DEBUG] msg_pack: packed_size=%u", packed_size);
-    
     if (packed_size == 0)
     {
-        ESP_LOGE(TAG, "[DEBUG] msg_pack failed!");
+        ESP_LOGE(TAG, "msg_pack failed");
         delete buffer;
         return false;
     }

@@ -66,33 +66,15 @@ bool message_bridge_t::process_buffer(const u8* buffer, u32 buffer_len)
         return false;
     }
 
-    ESP_LOGD(TAG, "[DEBUG] process_buffer: buffer_len=%u", buffer_len);
-
-    if (buffer_len >= MSG_HEADER_LEN)
-    {
-        char hex_buf[64];
-        int hex_len = 0;
-        for (int i = 0; i < MSG_HEADER_LEN && i < 12; i++)
-        {
-            hex_len += sprintf(hex_buf + hex_len, "%02X ", buffer[i]);
-        }
-        ESP_LOGD(TAG, "[DEBUG] process_buffer header bytes: %s", hex_buf);
-        ESP_LOGD(TAG, "[DEBUG] process_buffer payload_len bytes [7-10]: %02X %02X %02X %02X", buffer[7],
-                 buffer[8], buffer[9], buffer[10]);
-    }
-
     msg_header_t header;
     const u8* payload = nullptr;
     u32 payload_len = 0;
 
     if (!msg_unpack(buffer, buffer_len, &header, &payload, &payload_len))
     {
-        ESP_LOGE(TAG, "[DEBUG] process_buffer: msg_unpack failed!");
+        ESP_LOGE(TAG, "process_buffer: msg_unpack failed");
         return false;
     }
-
-    ESP_LOGD(TAG, "[DEBUG] process_buffer unpacked: payload_len=%u, header.payload_len=%u, dst=%d",
-             payload_len, header.payload_len, header.destination_id);
     
     return route_from_tcp(&header, payload, payload_len);
 }

@@ -52,7 +52,7 @@ class TextingTab(ttk.Frame):
         self.char_h_var = tk.StringVar(value="14")
         ttk.Entry(tf, textvariable=self.char_h_var, width=6).grid(row=0, column=1, padx=4, pady=2)
         ttk.Label(tf, text="line_spacing").grid(row=0, column=2, sticky=tk.W, padx=4, pady=2)
-        self.line_sp_var = tk.StringVar(value="2")
+        self.line_sp_var = tk.StringVar(value="14")
         ttk.Entry(tf, textvariable=self.line_sp_var, width=6).grid(row=0, column=3, padx=4, pady=2)
         ttk.Label(tf, text="typing_speed_ms").grid(row=1, column=0, sticky=tk.W, padx=4, pady=2)
         self.speed_var = tk.StringVar(value="50")
@@ -131,7 +131,7 @@ class TextingTab(ttk.Frame):
                 field_width=self._int(self._field_width_var, 380),
                 field_height=self._int(self._field_height_var, 120),
                 char_height=ch,
-                line_spacing=self._int(self.line_sp_var, 2),
+                line_spacing=self._int(self.line_sp_var, 14),
                 typing_speed_ms=self._int(self.speed_var, 50),
                 font_path=str(font_path),
                 chars_dir=str(chars_dir),

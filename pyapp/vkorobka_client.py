@@ -193,12 +193,10 @@ class VkorobkaClient:
                                 chunk_ack_key = f"{self.current_stream_test_id}:{chunk_index}"
                                 if chunk_ack_key in self.pending_chunk_acks:
                                     self.pending_chunk_acks[chunk_ack_key] = True
-                                    print(f"[client] [CHUNK_ACK] Получено подтверждение для чанка {chunk_index} (test_id={self.current_stream_test_id}, seq={seq})")
                                     found = True
                             audio_ack_key = f"audio:{chunk_index}"
                             if not found and audio_ack_key in self.pending_chunk_acks:
                                 self.pending_chunk_acks[audio_ack_key] = True
-                                print(f"[client] [CHUNK_ACK_AUDIO] Получено подтверждение для чанка {chunk_index} (seq={seq})")
                                 found = True
                             
                             # Если не нашли, ищем любой ключ с таким chunk_index
@@ -206,7 +204,6 @@ class VkorobkaClient:
                                 for key in list(self.pending_chunk_acks.keys()):
                                     if key.endswith(f":{chunk_index}"):
                                         self.pending_chunk_acks[key] = True
-                                        print(f"[client] [CHUNK_ACK] Получено подтверждение для чанка {chunk_index} (key={key}, seq={seq})")
                                         found = True
                                         break
                             
@@ -224,24 +221,16 @@ class VkorobkaClient:
         # Обычная обработка ответа по test_id
         test_id = message.get('test_id')
         
-        print(f"[client] [HANDLE] Обработка ответа с test_id={test_id}")
-        
         if not test_id:
-            print(f"[client] [DISCARD] Сообщение отброшено: отсутствует test_id")
-            print(f"[client] [DISCARD] Доступные ключи в сообщении: {list(message.keys())}")
             return
         
         if test_id not in self.pending_responses:
-            print(f"[client] [DISCARD] Сообщение отброшено: test_id={test_id} не найден в ожидающих ответах")
-            print(f"[client] [DISCARD] Ожидаемые test_id: {list(self.pending_responses.keys())}")
             return
         
-        print(f"[client] [ACCEPT] Сообщение принято для test_id={test_id}")
         with self.response_lock:
             self.pending_responses[test_id] = message
             # Уведомляем ожидающий поток
             self.pending_responses[test_id]['_received'] = True
-            print(f"[client] [ACCEPT] Ответ зарегистрирован и готов к извлечению")
     
     def send_test_message(self, destination: str, image_data: bytes, test_id: Optional[str] = None) -> str:
         """
@@ -646,9 +635,9 @@ class VkorobkaClient:
         dyn_mute: bool = False,
         dyn_clip: bool = True,
         send_dyn_set: bool = True,
-        flow_control: bool = True,
-        max_ack_wait_s: float = 0.12,
-        adaptive_pace: bool = True,
+        flow_control: bool = False,
+        max_ack_wait_s: float = 0.005,
+        adaptive_pace: bool = False,
         flow_window: int = 8,
         on_chunk_sent: Optional[Callable[[int, int, float], None]] = None,
     ) -> bool:
@@ -841,15 +830,8 @@ class VkorobkaClient:
         start_time = time.time()
         check_count = 0
         
-        print(f"[client] [WAIT] Ожидание ответа для test_id={test_id}, таймаут={timeout} сек")
-        
         while time.time() - start_time < timeout:
-            elapsed = time.time() - start_time
             check_count += 1
-            
-            # Логируем каждые 10 проверок (примерно раз в секунду)
-            if check_count % 10 == 0:
-                print(f"[client] [WAIT] Все еще ждем... прошло {elapsed:.1f} сек из {timeout} сек")
             
             with self.response_lock:
                 if test_id in self.pending_responses:
@@ -858,7 +840,6 @@ class VkorobkaClient:
                         # Удаляем из ожидающих и возвращаем
                         del self.pending_responses[test_id]
                         response.pop('_received', None)
-                        print(f"[client] [WAIT] Ответ получен через {elapsed:.2f} сек")
                         return response
             
             time.sleep(0.1)  # Небольшая задержка
@@ -866,11 +847,9 @@ class VkorobkaClient:
         # Таймаут
         elapsed = time.time() - start_time
         print(f"[client] [TIMEOUT] Таймаут ожидания ответа для test_id={test_id} (прошло {elapsed:.2f} сек)")
-        print(f"[client] [TIMEOUT] Проверено {check_count} раз")
         
         with self.response_lock:
             if test_id in self.pending_responses:
-                print(f"[client] [TIMEOUT] Удаляем test_id={test_id} из ожидающих")
                 del self.pending_responses[test_id]
         
         return None
