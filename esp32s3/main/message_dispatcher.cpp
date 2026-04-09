@@ -5,16 +5,39 @@
 #include "dyn_playback.hpp"
 #include "message_bridge.hpp"
 #include "esp_log.h"
+#include "esp_heap_caps.h"
 #include "my_types.h"
 #include <string.h>
 #include <stdlib.h>
 #include <stdio.h>
 
 static const char* TAG = "message_dispatcher";
+static constexpr u32 TEXTING_PAYLOAD_HARD_LIMIT = 24 * 1024;
+static constexpr u32 TEXTING_AUDIO_BUSY_SOFT_LIMIT = 6 * 1024;
+static constexpr size_t TEXTING_MIN_CONTIGUOUS_GUARD = 8 * 1024;
 
 // Внешние ссылки на глобальные объекты
 extern Ili9486Display* s_lcd;
 extern message_bridge_t* g_message_bridge;
+
+static void send_texting_status(const char* status)
+{
+    if (!g_message_bridge || !status)
+    {
+        return;
+    }
+    msg_header_t rh = msg_create_header(
+        MSG_TYPE_RESPONSE,
+        MSG_SRC_ESP32,
+        MSG_DST_EXTERNAL,
+        128,
+        0,
+        (u32)strlen(status),
+        0,
+        MSG_ROUTE_NONE
+    );
+    g_message_bridge->send_message(rh, reinterpret_cast<const u8*>(status), (u32)strlen(status));
+}
 
 // Обработчик новых сообщений через message_bridge
 void message_dispatcher_handle_new_message(const msg_header_t* header, const u8* payload, u32 payload_len)
@@ -212,10 +235,37 @@ void message_dispatcher_handle_new_message(const msg_header_t* header, const u8*
     if (header->source_id == MSG_SRC_EXTERNAL && header->destination_id == MSG_DST_ESP32 && 
         header->msg_type == MSG_TYPE_COMMAND && payload && payload_len > 0 && s_lcd)
     {
+        if (payload_len > TEXTING_PAYLOAD_HARD_LIMIT)
+        {
+            ESP_LOGE(TAG, "[TEXTING] Payload too large: %u > %u", payload_len, TEXTING_PAYLOAD_HARD_LIMIT);
+            send_texting_status("TEXT_ERR:PAYLOAD_TOO_LARGE");
+            return;
+        }
+
+        const bool audio_busy = dyn_playback_is_armed();
+        if (audio_busy && payload_len > TEXTING_AUDIO_BUSY_SOFT_LIMIT)
+        {
+            ESP_LOGW(TAG, "[TEXTING] Audio-first: retry later (payload=%u > soft=%u)",
+                     payload_len, TEXTING_AUDIO_BUSY_SOFT_LIMIT);
+            send_texting_status("TEXT_ERR:RETRY_LATER");
+            return;
+        }
+
+        const size_t free_heap = heap_caps_get_free_size(MALLOC_CAP_8BIT);
+        const size_t largest = heap_caps_get_largest_free_block(MALLOC_CAP_8BIT);
+        if (largest <= TEXTING_MIN_CONTIGUOUS_GUARD || (size_t)(payload_len + 1) > largest)
+        {
+            ESP_LOGE(TAG, "[TEXTING] Not enough contiguous heap for JSON parse: payload=%u free=%u largest=%u",
+                     payload_len, (unsigned)free_heap, (unsigned)largest);
+            send_texting_status(audio_busy ? "TEXT_ERR:RETRY_LATER" : "TEXT_ERR:LOW_HEAP");
+            return;
+        }
+
         // Создаем временную строку для парсинга JSON
         char* json_buf = (char*)malloc(payload_len + 1);
         if (!json_buf) {
             ESP_LOGE(TAG, "[TEXTING] Failed to allocate memory for JSON parsing");
+            send_texting_status("TEXT_ERR:LOW_HEAP");
             return;
         }
         

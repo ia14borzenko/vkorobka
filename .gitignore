@@ -38,6 +38,7 @@ esp32s3/.cache/
 
 pyapp\__pycache__\
 *.pyc
+*.zip
 
 pyapp/fonts
 
