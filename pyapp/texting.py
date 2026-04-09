@@ -2,6 +2,9 @@
 Модуль текстинга: управление текстовым полем, разбивка текста на строки, управление курсором
 """
 import base64
+import json
+import re
+import time
 from typing import Dict, Tuple, List, Optional
 from PIL import Image
 from font_utils import (
@@ -73,6 +76,12 @@ class TextingManager:
         self.destination = destination
         self.command_timeout_s = float(command_timeout_s)
         self.clear_before_add_default = bool(clear_before_add_default)
+        # Audio-first safe defaults: smaller TEXT_ADD payloads + retries.
+        self.max_command_payload_bytes = 5500
+        self.max_text_chunk_chars = 120
+        self.max_send_retries = 8
+        self.retry_backoff_initial_s = 0.08
+        self.retry_backoff_max_s = 0.8
         
         # Состояние курсора
         self.cursor_x = 0  # Относительно начала поля
@@ -126,11 +135,38 @@ class TextingManager:
         for i, line in enumerate(lines):
             print(f"  Строка {i+1}: '{line}'")
         
-        # Отправляем весь текст сразу на ESP32
+        # Audio-first: отправляем текст кусками и повторяем позже при RETRY_LATER/LOW_HEAP.
         clear_flag = self.clear_before_add_default if clear_before_add is None else bool(clear_before_add)
         if self.client:
-            self._send_text_command(text, lines, clear_before_add=clear_flag)
-            self._advance_cursor_state(text)
+            queue: List[Tuple[str, bool]] = [
+                (chunk, clear_flag and i == 0)
+                for i, chunk in enumerate(self._split_for_transport(text))
+            ]
+            while queue:
+                chunk, clear_before = queue.pop(0)
+                ok, reason = self._send_text_command(chunk, clear_before_add=clear_before)
+                if ok:
+                    self._advance_cursor_state(chunk)
+                    continue
+
+                # Если чанк уже минимальный — не зацикливаемся.
+                if len(chunk) <= 1:
+                    print(f"[texting] Минимальный чанк не отправлен: reason={reason}")
+                    continue
+
+                # Для retry-able ошибок режем чанк и пробуем снова.
+                if reason.startswith("TEXT_ERR:") or reason == "TIMEOUT":
+                    mid = max(1, len(chunk) // 2)
+                    left = chunk[:mid].strip()
+                    right = chunk[mid:].strip()
+                    repl: List[Tuple[str, bool]] = []
+                    if left:
+                        repl.append((left, clear_before))
+                    if right:
+                        repl.append((right, False))
+                    queue = repl + queue
+                else:
+                    print(f"[texting] Чанк отброшен: reason={reason}")
         else:
             print("[texting] Клиент не установлен, команда не отправлена")
     
@@ -248,54 +284,120 @@ class TextingManager:
         
         print(f"[texting] Отправлена команда TEXT_CLEAR (test_id={test_id})")
     
-    def _send_text_command(self, text: str, lines: List[str], *, clear_before_add: bool = False) -> None:
-        """
-        Отправляет команду добавления текста на ESP32 вместе с изображениями символов.
-        
-        Args:
-            text: Исходный текст
-            lines: Разбитый на строки текст (для информации)
-        """
-        if not self.client:
-            print("[texting] Клиент не установлен, команда не отправлена")
-            return
-        
-        # Собираем уникальные символы из текста
+    def _collect_chars_payload(self, text: str) -> Dict[str, Dict]:
         unique_chars = set(text)
-        chars_data = {}
-        
-        print(f"[texting] Подготовка {len(unique_chars)} уникальных символов для передачи...")
-        
+        chars_data: Dict[str, Dict] = {}
+
         for char in unique_chars:
-            # Получаем изображение символа
             char_image = get_char_image(char, self.font_cache)
             if char_image is None:
                 print(f"[texting] Предупреждение: символ '{char}' (U+{ord(char):04X}) не найден в кэше, пропускаем")
                 continue
-            
-            # Конвертируем в RGB565
-            # Сначала конвертируем RGBA в RGB (белый фон для прозрачных пикселей)
+
             if char_image.mode == 'RGBA':
-                # Создаем белый фон
                 rgb_img = Image.new('RGB', char_image.size, (255, 255, 255))
-                # Накладываем символ на белый фон
                 rgb_img.paste(char_image, mask=char_image.split()[3])  # используем альфа-канал как маску
             else:
                 rgb_img = char_image.convert('RGB')
-            
-            # Конвертируем в RGB565 big-endian
+
             rgb565_data = image_to_rgb565_be(rgb_img)
-            
-            # Кодируем в base64 для передачи в JSON
             char_data_b64 = base64.b64encode(rgb565_data).decode('utf-8')
-            
-            # Сохраняем данные символа
             unicode_code = f"U+{ord(char):04X}"
             chars_data[unicode_code] = {
                 "width": char_image.width,
                 "height": char_image.height,
                 "data": char_data_b64
             }
+        return chars_data
+
+    def _estimate_payload_bytes(self, text: str, chars_data: Dict[str, Dict], clear_before_add: bool) -> int:
+        payload_data = {
+            "text": text,
+            "clear_before_add": bool(clear_before_add),
+            "field_x": self.field_x,
+            "field_y": self.field_y,
+            "field_width": self.field_width,
+            "field_height": self.field_height,
+            "char_height": self.char_height,
+            "line_spacing": self.line_spacing,
+            "typing_speed_ms": self.typing_speed_ms,
+            "cursor_x": self.cursor_x,
+            "cursor_y": self.cursor_y,
+            "current_line_index": self.current_line_index,
+            "chars": chars_data
+        }
+        command_payload = json.dumps({"command": "TEXT_ADD", **payload_data}, ensure_ascii=False, separators=(",", ":"))
+        return len(command_payload.encode("utf-8"))
+
+    def _split_for_transport(self, text: str) -> List[str]:
+        text = (text or "").strip()
+        if not text:
+            return []
+
+        tokens = re.findall(r"\S+\s*", text)
+        if not tokens:
+            return [text]
+
+        chunks: List[str] = []
+        current = ""
+        for token in tokens:
+            candidate = current + token
+            chars_data = self._collect_chars_payload(candidate)
+            if (
+                len(candidate) <= self.max_text_chunk_chars
+                and self._estimate_payload_bytes(candidate, chars_data, False) <= self.max_command_payload_bytes
+            ):
+                current = candidate
+                continue
+
+            if current.strip():
+                chunks.append(current.strip())
+                current = ""
+
+            # Токен может быть очень длинным; режем по символам.
+            piece = ""
+            for ch in token:
+                c2 = piece + ch
+                chars_data = self._collect_chars_payload(c2)
+                if (
+                    len(c2) <= self.max_text_chunk_chars
+                    and self._estimate_payload_bytes(c2, chars_data, False) <= self.max_command_payload_bytes
+                ):
+                    piece = c2
+                else:
+                    if piece.strip():
+                        chunks.append(piece.strip())
+                    piece = ch
+            if piece.strip():
+                current = piece
+
+        if current.strip():
+            chunks.append(current.strip())
+        return chunks
+
+    def _decode_payload_text(self, response: Dict) -> str:
+        payload_b64 = response.get("payload")
+        if not payload_b64:
+            return ""
+        try:
+            payload = base64.b64decode(payload_b64)
+            return payload.decode("utf-8", errors="replace")
+        except Exception:
+            return ""
+
+    def _send_text_command(self, text: str, *, clear_before_add: bool = False) -> Tuple[bool, str]:
+        """
+        Отправляет команду добавления текста на ESP32 вместе с изображениями символов.
+        
+        Args:
+            text: Исходный текст
+            clear_before_add: Очистить поле перед добавлением чанка
+        """
+        if not self.client:
+            print("[texting] Клиент не установлен, команда не отправлена")
+            return False, "NO_CLIENT"
+
+        chars_data = self._collect_chars_payload(text)
         
         print(f"[texting] Подготовлено {len(chars_data)} символов (размер данных: ~{sum(len(c['data']) for c in chars_data.values())} байт base64)")
         
@@ -316,17 +418,35 @@ class TextingManager:
             "chars": chars_data  # Словарь с данными символов
         }
         
-        # Отправляем команду
-        test_id = self.client.send_command(
-            destination=self.destination,
-            command="TEXT_ADD",
-            payload_data=payload_data
-        )
-        resp = self.client.wait_for_response(test_id, timeout=self.command_timeout_s)
-        if resp is None:
-            print("[texting] Предупреждение: timeout ожидания TEXT_ADD")
-        
-        print(f"[texting] Отправлена команда TEXT_ADD (test_id={test_id}), текст: '{text[:50]}...' (если длинный), символов: {len(chars_data)}")
+        wait_s = self.retry_backoff_initial_s
+        for attempt in range(1, self.max_send_retries + 1):
+            test_id = self.client.send_command(
+                destination=self.destination,
+                command="TEXT_ADD",
+                payload_data=payload_data
+            )
+            resp = self.client.wait_for_response(test_id, timeout=self.command_timeout_s)
+            if resp is None:
+                print(f"[texting] timeout ожидания TEXT_ADD (attempt={attempt})")
+                time.sleep(min(wait_s, self.retry_backoff_max_s))
+                wait_s = min(wait_s * 2.0, self.retry_backoff_max_s)
+                continue
+
+            ack_txt = self._decode_payload_text(resp)
+            if "TEXT_ADD_OK" in ack_txt or ack_txt == "":
+                print(f"[texting] Отправлена команда TEXT_ADD (test_id={test_id}), текст: '{text[:50]}...' (если длинный), символов: {len(chars_data)}")
+                return True, "OK"
+
+            # Audio-first: при занятости аудио/низком heap ждём и пробуем позже.
+            if "TEXT_ERR:RETRY_LATER" in ack_txt or "TEXT_ERR:LOW_HEAP" in ack_txt:
+                print(f"[texting] TEXT_ADD retry later: {ack_txt} (attempt={attempt})")
+                time.sleep(min(wait_s, self.retry_backoff_max_s))
+                wait_s = min(wait_s * 2.0, self.retry_backoff_max_s)
+                continue
+
+            return False, ack_txt
+
+        return False, "TIMEOUT"
 
     def _advance_cursor_state(self, text: str) -> None:
         """

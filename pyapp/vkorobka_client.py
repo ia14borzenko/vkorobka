@@ -942,7 +942,7 @@ class VkorobkaClient:
             command_payload = json.dumps({
                 "command": command,
                 **payload_data
-            }, ensure_ascii=False)
+            }, ensure_ascii=False, separators=(",", ":"))
         else:
             # Просто текст команды
             command_payload = command
