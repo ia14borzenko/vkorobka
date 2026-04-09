@@ -1020,3 +1020,101 @@ FUNCTIONAL PIN DESCRIPTION
 | 3.3V          | DYN_GAIN_SL  |
 
 Протокол команд **`dyn.on` / `dyn.off`**, поток **`stream_id = 3`**, утилита **`speaker_cli.py`** и разводка **I2S0/I2S1** описаны в разделе **«Аудио: микрофон и динамик»** выше.
+
+## ESP32-S3: полный список команд
+
+Ниже перечислены команды, которые принимает ESP32-S3 в текущей реализации.
+
+### 1) Локальная консоль ESP32 (UART monitor)
+
+Команды вводятся в консоль `idf.py monitor`:
+
+- `status`
+  - Выводит состояние Wi-Fi и TCP (connected/state/endpoint).
+- `wifi_setup`
+  - Интерактивный мастер:
+    - сканирует Wi-Fi,
+    - предлагает выбрать сеть,
+    - ввод пароля (переключение видимости `Ctrl+T`),
+    - подключение,
+    - сохранение/не сохранение Wi-Fi в NVS.
+- `server_set [ip] [port]`
+  - Меняет runtime endpoint TCP-сервера.
+  - Если аргументы не переданы — запросит интерактивно.
+  - Поддерживает сохранение/не сохранение endpoint в NVS.
+  - Пример: `server_set 192.168.1.10 1234`
+- `server_saved_show`
+  - Показывает сохранённый в NVS endpoint сервера или сообщает, что он не задан.
+- `server_saved_clear`
+  - Удаляет из NVS сохранённые `server_ip/server_port`.
+
+Технические формы (тоже поддерживаются консолью):
+
+- `<data>`
+  - Отправка raw payload в TCP (если есть соединение).
+- `send <code> <data>`
+  - Отправка legacy CMD-пакета с кодом (hex/dec), например:
+  - `send 0x41 hello`
+  - `send 65 hello`
+
+### 2) Сетевые команды (через pyapp/win-x64, `MSG_TYPE_COMMAND`)
+
+Эти команды приходят на ESP32 как текстовый payload.
+
+#### Микрофон
+
+- `voice.on`
+  - Включить uplink микрофона.
+- `voice.off`
+  - Выключить uplink микрофона.
+- `voice.set {json}`
+  - Настройка микрофона (разрешено при `voice.off`):
+  - Поля JSON:
+    - `rate_hz` (int)
+    - `bits` (16|24)
+    - `gain_db` (float)
+    - `chunk_samples` (64..512)
+    - `mute` (bool)
+    - `clip` (bool)
+  - Пример:
+  - `voice.set {"rate_hz":48000,"bits":24,"gain_db":3.0,"chunk_samples":512,"mute":false,"clip":true}`
+
+#### Динамик
+
+- `dyn.on`
+  - Включить приём PCM для динамика.
+- `dyn.off`
+  - Выключить приём PCM для динамика.
+- `dyn.set {json}`
+  - Настройка динамика (разрешено при `dyn.off`):
+  - Поля JSON:
+    - `rate_hz` (int; допустимые: `8000,11025,12000,16000,22050,24000,32000,44100,48000`)
+    - `bits` (только `16`)
+    - `gain_db` (float)
+    - `mute` (bool)
+    - `clip` (bool)
+  - Пример:
+  - `dyn.set {"rate_hz":16000,"bits":16,"gain_db":0.0,"mute":false,"clip":true}`
+
+#### Текстинг/дисплей
+
+- `TEXT_CLEAR` (передаётся как JSON-команда `{"command":"TEXT_CLEAR", ...}`)
+  - Очистка поля.
+  - Параметры:
+    - `field_x`, `field_y`, `field_width`, `field_height`.
+- `TEXT_ADD` (передаётся как JSON-команда `{"command":"TEXT_ADD", ...}`)
+  - Вывод текста с по-символьной печатью.
+  - Основные параметры:
+    - `text`
+    - `clear_before_add`
+    - `field_x`, `field_y`, `field_width`, `field_height`
+    - `char_height`, `line_spacing`, `typing_speed_ms`
+    - `cursor_x`, `cursor_y`, `current_line_index`
+    - `chars` (словарь глифов `U+XXXX -> {width,height,data(base64 RGB565)}`)
+
+#### Служебные команды
+
+- `TEST`
+  - Проверка канала команд.
+- `STATUS`
+  - Служебный статус для внешнего клиента.

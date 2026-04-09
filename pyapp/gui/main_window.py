@@ -4,6 +4,8 @@ from __future__ import annotations
 
 import threading
 import tkinter as tk
+from datetime import datetime
+from pathlib import Path
 from tkinter import messagebox, scrolledtext, ttk
 
 import numpy as np
@@ -260,11 +262,20 @@ def main() -> None:
     lf = ttk.LabelFrame(root, text="Журнал")
     log_widget = scrolledtext.ScrolledText(lf, height=11, wrap=tk.WORD)
     status_var = tk.StringVar(value="Готово.")
+    log_file_path = Path(__file__).resolve().parents[1] / "gui_commands.log"
+    log_file_lock = threading.Lock()
 
     def log(msg: str) -> None:
+        ts = datetime.now().strftime("%H:%M:%S:%f")[:-3]
+        line = f"{ts} {msg}"
+
         def append() -> None:
-            log_widget.insert(tk.END, msg + "\n")
+            log_widget.insert(tk.END, line + "\n")
             log_widget.see(tk.END)
+
+        with log_file_lock:
+            with log_file_path.open("a", encoding="utf-8") as fp:
+                fp.write(line + "\n")
 
         root.after(0, append)
 

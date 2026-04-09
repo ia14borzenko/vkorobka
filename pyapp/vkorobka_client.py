@@ -20,6 +20,7 @@ class VkorobkaClient:
         server_port=1236,
         timeout=10.0,
         verbose_udp: bool = True,
+        command_logger: Optional[Callable[[str, str, str], None]] = None,
     ):
         """
         Инициализация клиента
@@ -29,11 +30,13 @@ class VkorobkaClient:
             server_port: UDP порт (по умолчанию 1236)
             timeout: Таймаут ожидания ответа в секундах
             verbose_udp: Подробный лог входящих UDP (для потоков лучше False)
+            command_logger: Callback для аудита команд (destination, command, test_id)
         """
         self.server_host = server_host
         self.server_port = server_port
         self.timeout = timeout
         self.verbose_udp = verbose_udp
+        self._command_logger = command_logger
         # Обработчики MSG_TYPE_STREAM с ESP32 (stream_id -> callback)
         self._stream_handlers: Dict[int, Callable[[Dict[str, Any]], None]] = {}
         # Пассивные подписчики на STREAM (не заменяют основной handler)
@@ -973,7 +976,12 @@ class VkorobkaClient:
         print(f"[client] Отправлена команда '{command}' test_id={test_id} для destination={destination}")
         if payload_data:
             print(f"[client] Payload размер: {len(command_payload)} байт (base64: {len(command_b64)} символов)")
-        
+        if self._command_logger:
+            try:
+                self._command_logger(destination, command, test_id)
+            except Exception as e:
+                print(f"[client] [WARN] command_logger failed: {e}", file=sys.stderr)
+
         return test_id
     
     def close(self):

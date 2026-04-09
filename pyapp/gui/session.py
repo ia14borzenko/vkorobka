@@ -75,6 +75,7 @@ class AppSession:
             server_port=self.port,
             timeout=self.timeout,
             verbose_udp=self.verbose_udp,
+            command_logger=self._on_client_command,
         )
         self.log(f"[session] Подключено к {self.host}:{self.port}, timeout={self.timeout}s")
 
@@ -91,3 +92,8 @@ class AppSession:
         if not self._client:
             raise RuntimeError("Сначала подключитесь к win-x64 (вкладка «Сеть»).")
         return self._client
+
+    def _on_client_command(self, destination: str, command: str, test_id: str) -> None:
+        if destination != "esp32":
+            return
+        self.log(f"[esp32-cmd] test_id={test_id} cmd={command}")

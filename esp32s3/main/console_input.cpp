@@ -290,6 +290,29 @@ static void handle_server_set(const char* payload) {
     }
 }
 
+static void handle_server_saved_show(void) {
+    app_config_t cfg;
+    if (!app_config_load(cfg)) {
+        ESP_LOGW(TAG, "NVS app config is not available");
+        return;
+    }
+
+    if (!cfg.has_server) {
+        ESP_LOGI(TAG, "Saved server endpoint: <not set>");
+        return;
+    }
+
+    ESP_LOGI(TAG, "Saved server endpoint: %s:%d", cfg.server_ip.c_str(), cfg.server_port);
+}
+
+static void handle_server_saved_clear(void) {
+    if (app_config_clear_server()) {
+        ESP_LOGI(TAG, "Saved server endpoint removed from NVS");
+    } else {
+        ESP_LOGE(TAG, "Failed to remove saved server endpoint from NVS");
+    }
+}
+
 // Задача для чтения консольного ввода и отправки сообщений
 static void console_input_task(void* pvParameters) {
     char payload[256];
@@ -306,6 +329,8 @@ static void console_input_task(void* pvParameters) {
     printf("  Format: send <code> <data> - send CMD packet (code: 0x41 or 65)\r\n");
     printf("  Command: wifi_setup - interactive Wi-Fi setup\r\n");
     printf("  Command: server_set [ip] [port] - change TCP endpoint\r\n");
+    printf("  Command: server_saved_show - show saved server endpoint in NVS\r\n");
+    printf("  Command: server_saved_clear - remove saved server endpoint from NVS\r\n");
     fflush(stdout);
     
     while (1) {
@@ -358,6 +383,20 @@ static void console_input_task(void* pvParameters) {
 
                 if (strncmp(payload, "server_set", 10) == 0) {
                     handle_server_set(payload);
+                    printf("\r\n");
+                    pos = 0;
+                    continue;
+                }
+
+                if (strcmp(payload, "server_saved_show") == 0) {
+                    handle_server_saved_show();
+                    printf("\r\n");
+                    pos = 0;
+                    continue;
+                }
+
+                if (strcmp(payload, "server_saved_clear") == 0) {
+                    handle_server_saved_clear();
                     printf("\r\n");
                     pos = 0;
                     continue;
