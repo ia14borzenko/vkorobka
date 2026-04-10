@@ -46,3 +46,5 @@ pyapp/fonts
 *.flac
 *.mp3
 esp32s3/sdkconfig
+*.zip
+*.log
